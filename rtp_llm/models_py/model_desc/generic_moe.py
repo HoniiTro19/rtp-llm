@@ -491,7 +491,7 @@ class GenericMoeModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
 
-        hidden_states = self.norm(hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 

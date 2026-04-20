@@ -388,6 +388,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             ],
             dim=2,
         )
+
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
         # contiguous will be applyed when call fused_recurrent_gated_delta_rule
