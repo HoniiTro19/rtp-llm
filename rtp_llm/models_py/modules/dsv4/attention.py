@@ -922,6 +922,37 @@ class Attention(nn.Module):
             stride=(raw_u8.stride(0), _DSV4_FP8_KV_ENTRY_BYTES, 1),
         )
 
+    def _kv_pool_3d_uint8(self, attn_type: int) -> Optional[torch.Tensor]:
+        """Padded-stride-aware 3D view for any 584B FP8 KV pool (SWA / CSA / HCA).
+
+        Same layout/padding logic as ``_swa_pool_3d_uint8`` but parametrised
+        by attn_type. Returns None when the layer doesn't own the pool or
+        the layer is BF16.
+        """
+        if not self._kv_cache_is_fp8 or self._kv_cache is None:
+            return None
+        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(attn_type)
+        if attn_type_enum is None:
+            return None
+        try:
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+        except RuntimeError:
+            return None
+        base = layer_kv.kv_cache_base
+        if base is None or base.numel() == 0 or base.dim() != 2:
+            return None
+        num_blocks = int(base.shape[0])
+        padded_stride_bytes = int(base.shape[1]) * int(base.element_size())
+        eb = padded_stride_bytes // _DSV4_FP8_KV_ENTRY_BYTES
+        if eb <= 0 or eb * _DSV4_FP8_KV_ENTRY_BYTES > padded_stride_bytes:
+            return None
+        raw_u8 = base.view(torch.uint8)
+        return torch.as_strided(
+            raw_u8,
+            size=(num_blocks, eb, _DSV4_FP8_KV_ENTRY_BYTES),
+            stride=(raw_u8.stride(0), _DSV4_FP8_KV_ENTRY_BYTES, 1),
+        )
+
     def _pool_entries_per_block(self, attn_type: int) -> int:
         """Derive ``entries_per_block`` from the framework pool tensor for
         this layer + attn_type.  Returns 0 if pool unavailable."""
@@ -1329,12 +1360,59 @@ class Attention(nn.Module):
             block_id * eb + in_block.unsqueeze(0),
             torch.zeros_like(block_id),
         )  # [B, T]
+        # FP8 SWA pool: use miji's real dequant (dequantize_swa_window_to_bf16)
+        # which reads the 584B/token packed pool via block_table. Only valid
+        # for the SWA layer-0 shape (T == win); CSA/HCA 584B pools still go
+        # through the per-row hack below.
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV as _SWA_KV
+
+        if (
+            attn_type == _SWA_KV
+            and pool_view.dtype == torch.uint8
+            and T == self.window_size
+        ):
+            from rtp_llm.models_py.modules.dsv4._swa_fp8_dequant_triton import (
+                dequantize_swa_window_to_bf16,
+            )
+
+            packed_3d = self._swa_pool_3d_uint8()
+            if packed_3d is None:
+                return None
+            seq_lens_full = torch.full((bsz,), T, device=device, dtype=torch.int32)
+            out = dequantize_swa_window_to_bf16(
+                kv_cache_packed=packed_3d,
+                block_table=bt[:bsz],
+                seq_lens=seq_lens_full,
+                win=T,
+                block_size=eb,
+            )
+            if out.dtype != dtype:
+                out = out.to(dtype)
+            # dequantize_swa_window_to_bf16 does not sentinel-mask invalid
+            # block_ids (it reads physical block 0 for them). Zero-fill the
+            # same positions the per-row hack would have zeroed.
+            zero_row = torch.zeros((), dtype=dtype, device=device)
+            out_flat = torch.where(
+                valid.reshape(-1).unsqueeze(-1),
+                out.reshape(bsz * T, vec_dim),
+                zero_row,
+            )
+            return out_flat.view(bsz, T, vec_dim).contiguous()
+
         gathered = pool_view.index_select(0, safe_slot.reshape(-1))  # [B*T, vec_dim]
+        # TEMP fp8 hack (plan §1.1): CSA/HCA 584B pool still on per-row
+        # pack/unpack — miji's real impl only covers SWA.
+        if attn_type != _SWA_KV and pool_view.dtype == torch.uint8:
+            from rtp_llm.models_py.modules.dsv4._swa_fp8_pack import unpack_swa_fp8
+
+            gathered = unpack_swa_fp8(gathered)
+            if gathered.dtype != dtype:
+                gathered = gathered.to(dtype)
         # Pool storage dtype matches source_buf dtype by construction (see
         # _prefill_paged_write_kv which writes via write_kv_to_pool →
         # index_copy_).  BF16 KV pools, fp32 STATE pools.  Enforce dtype
         # + zero-fill sentinels in one where().
-        if gathered.dtype != dtype:
+        elif gathered.dtype != dtype:
             gathered = gathered.to(dtype)
         zero_row = torch.zeros((), dtype=dtype, device=device)
         out_flat = torch.where(
@@ -1463,6 +1541,7 @@ class Attention(nn.Module):
         context resolution shares one code path with prefill."""
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
+        prev_ai = getattr(self, "_attn_inputs", None)
         if kv_cache is not None:
             self._kv_cache = kv_cache
         if attn_metadata.pool_block_tables is not None:
@@ -1476,6 +1555,7 @@ class Attention(nn.Module):
         finally:
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
+            self._attn_inputs = prev_ai
 
     def _forward_decode_body(
         self,
@@ -1551,7 +1631,30 @@ class Attention(nn.Module):
 
         swa_pool_slots = attn_metadata.pool_write_slot_mappings.get(SWA_KV)
         swa_view = self._pool_view(SWA_KV)
+        # FP8 SWA: use the real quantize_v4_kv_decode CUDA op against the
+        # 3D 584B pool (native fp8_ds_mla layout, sentinel slot < 0 handled
+        # by the kernel). BF16 SWA stays on the flat pool_view + write_kv_to_pool.
         if (
+            self._kv_cache_is_fp8
+            and swa_pool_slots is not None
+            and swa_pool_slots.numel() > 0
+        ):
+            from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
+                quantize_v4_kv_decode,
+            )
+
+            packed_3d = self._swa_pool_3d_uint8()
+            if packed_3d is not None:
+                quantize_v4_kv_decode(
+                    (
+                        kv_flat
+                        if kv_flat.dtype == torch.bfloat16
+                        else kv_flat.to(torch.bfloat16)
+                    ),
+                    swa_pool_slots[: bsz * q_len],
+                    packed_3d,
+                )
+        elif (
             swa_view is not None
             and swa_pool_slots is not None
             and swa_pool_slots.numel() > 0
@@ -1654,12 +1757,20 @@ class Attention(nn.Module):
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
 
         swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
+        # FP8 SWA pool stride is 576B-padded so ``_pool_view`` returns
+        # None (reshape→flat-2D would mis-address). The FP8 read branches
+        # below pull the padded 3D view via ``_swa_pool_3d_uint8`` directly,
+        # so the gate only requires the pool *exists*, not that the flat
+        # view is materializable.
         swa_view_cache = self._pool_view(SWA_KV)
+        swa_pool_present = swa_view_cache is not None or (
+            self._kv_cache_is_fp8 and self._swa_pool_3d_uint8() is not None
+        )
 
         # Decide which paged read variant to use, if any.
         use_paged_swa_read = (
             not self.compress_ratio
-            and swa_view_cache is not None
+            and swa_pool_present
             and attn_metadata.swa_abs_idx is not None
             and swa_pool_bt is not None
             and swa_pool_bt.numel() > 0
@@ -1678,10 +1789,15 @@ class Attention(nn.Module):
         cmp_view_cache = (
             self._pool_view(cmp_attn_type) if cmp_attn_type is not None else None
         )
+        cmp_pool_present = cmp_view_cache is not None or (
+            self._kv_cache_is_fp8
+            and cmp_attn_type is not None
+            and self._kv_pool_3d_uint8(cmp_attn_type) is not None
+        )
         use_paged_dual_read = (
             self.compress_ratio in (4, 128)
-            and swa_view_cache is not None
-            and cmp_view_cache is not None
+            and swa_pool_present
+            and cmp_pool_present
             and attn_metadata.swa_abs_idx is not None
             and swa_pool_bt is not None
             and swa_pool_bt.numel() > 0
@@ -1709,16 +1825,61 @@ class Attention(nn.Module):
             )
 
             if use_paged_swa_read:
-                # Zero-copy: pool view fed straight to TileLang kernel.
+                # FP8 path: materialize [B, win, 512] bf16 via miji's real
+                # dequant, then feed sparse_op with per-req local indices
+                # (flattened to global via B*win offsets).
                 q_packed = (
                     q.transpose(0, 1).contiguous() if q_len > 1 else q.transpose(0, 1)
                 )
-                o_packed = sparse_op.forward(
-                    q_packed,
-                    swa_view_cache.unsqueeze(0),
-                    self.attn_sink,
-                    swa_global.view(1, T, win).contiguous(),
-                )
+                if self._kv_cache_is_fp8:
+                    from rtp_llm.models_py.modules.dsv4._swa_fp8_dequant_triton import (
+                        dequantize_swa_window_to_bf16,
+                    )
+
+                    packed_3d = self._swa_pool_3d_uint8()
+                    assert packed_3d is not None, "FP8 SWA pool not available"
+                    # seq_lens = win so the kernel fills the whole ring per req.
+                    seq_lens_full = torch.full(
+                        (bsz,), win, device=swa_pool_bt.device, dtype=torch.int32
+                    )
+                    bf16_win = dequantize_swa_window_to_bf16(
+                        kv_cache_packed=packed_3d,
+                        block_table=swa_pool_bt[:bsz],
+                        seq_lens=seq_lens_full,
+                        win=win,
+                        block_size=swa_eb,
+                    )  # [B, win, 512] bf16
+                    # Build per-token local-to-flat indices: add b*win offset
+                    # so flat kv = bf16_win.view(B*win, D).
+                    b_idx = (
+                        torch.arange(
+                            bsz, device=swa_local.device, dtype=swa_local.dtype
+                        )
+                        .view(bsz, 1, 1)
+                        .expand(bsz, q_len, win)
+                        .reshape(T, win)
+                    )
+                    # swa_local is per-req ring index in [0, win); mask sentinels.
+                    sentinel = swa_local < 0
+                    local_flat = torch.where(
+                        sentinel,
+                        swa_local,
+                        swa_local + b_idx * win,
+                    )
+                    flat_kv = bf16_win.reshape(bsz * win, self.head_dim).unsqueeze(0)
+                    o_packed = sparse_op.forward(
+                        q_packed,
+                        flat_kv,
+                        self.attn_sink,
+                        local_flat.view(1, T, win).contiguous(),
+                    )
+                else:
+                    o_packed = sparse_op.forward(
+                        q_packed,
+                        swa_view_cache.unsqueeze(0),
+                        self.attn_sink,
+                        swa_global.view(1, T, win).contiguous(),
+                    )
                 o = o_packed.transpose(0, 1)
             else:
                 # Dual-pool: TileLang kernel can't take 2 kv tensors so we
@@ -1738,9 +1899,100 @@ class Attention(nn.Module):
                     "Phase 2B-2b dual-pool paged read currently supports "
                     f"q_len=1 only (got {q_len})"
                 )
+                # TEMP fp8 hack: CSA/HCA 584B pools still on per-row
+                # pack/unpack — miji's real SWA dequant is window-oriented
+                # ([B, win, 512]) and doesn't plug into gather_dual_pool_kv_packed
+                # which indexes a flat [num_slots, 512] pool. Since dual-pool
+                # read only fires on CSA/HCA layers (compress_ratio in (4,128))
+                # which are beyond miji's layer-0 SWA scope anyway, we keep
+                # FP8 dual-pool: ``_pool_view`` returns None (576B padding
+                # blocks the flat reshape). Gather only the referenced slots
+                # (B*win for SWA, B*K_cmp for cmp), dequant to bf16, and
+                # rebase the global indices to point into the small scratch.
+                swa_kv_for_gather = swa_view_cache
+                cmp_kv_for_gather = cmp_view_cache
+
+                def _gather_slots_to_bf16(
+                    pool_3d: torch.Tensor, eb: int, slot_idx: torch.Tensor
+                ) -> torch.Tensor:
+                    """Fancy-index per-slot dequant; pool_3d is [num_blocks, eb, 584]
+                    with padded dim-0 stride. Returns [N, 512] bf16."""
+                    from rtp_llm.models_py.modules.dsv4._swa_fp8_pack import (
+                        unpack_swa_fp8,
+                    )
+
+                    safe = slot_idx.clamp(min=0)
+                    blk = safe // eb
+                    off = safe % eb
+                    raw = pool_3d[blk, off, :].contiguous()  # [N, 584] uint8
+                    return unpack_swa_fp8(raw)
+
+                if self._kv_cache_is_fp8 and swa_view_cache is None:
+                    # SWA pool was written with miji's real FP8 layout
+                    # (quantize_v4_kv_decode); use the matching window
+                    # dequant per-req. swa_local is the in-window ring index.
+                    from rtp_llm.models_py.modules.dsv4._swa_fp8_dequant_triton import (
+                        dequantize_swa_window_to_bf16,
+                    )
+
+                    packed_3d = self._swa_pool_3d_uint8()
+                    assert packed_3d is not None
+                    seq_lens_full = torch.full(
+                        (bsz,), win, device=swa_pool_bt.device, dtype=torch.int32
+                    )
+                    bf16_win = dequantize_swa_window_to_bf16(
+                        kv_cache_packed=packed_3d,
+                        block_table=swa_pool_bt[:bsz],
+                        seq_lens=seq_lens_full,
+                        win=win,
+                        block_size=swa_eb,
+                    )  # [B, win, 512] bf16
+                    swa_kv_for_gather = bf16_win.reshape(bsz * win, self.head_dim)
+                    b_idx = (
+                        torch.arange(
+                            bsz, device=swa_local.device, dtype=swa_local.dtype
+                        )
+                        .view(bsz, 1, 1)
+                        .expand(bsz, q_len, win)
+                        .reshape(T, win)
+                    )
+                    sentinel_swa = swa_local < 0
+                    swa_global = torch.where(
+                        sentinel_swa, swa_local, swa_local + b_idx * win
+                    ).view(T, win)
+                elif swa_view_cache is not None and swa_view_cache.dtype == torch.uint8:
+                    from rtp_llm.models_py.modules.dsv4._swa_fp8_pack import (
+                        unpack_swa_fp8,
+                    )
+
+                    swa_kv_for_gather = unpack_swa_fp8(swa_view_cache)
+
+                if self._kv_cache_is_fp8 and cmp_view_cache is None:
+                    cmp_packed_3d = self._kv_pool_3d_uint8(cmp_attn_type)
+                    assert cmp_packed_3d is not None
+                    flat_cmp = cmp_global.reshape(-1)
+                    cmp_bf16 = _gather_slots_to_bf16(cmp_packed_3d, cmp_eb, flat_cmp)
+                    sentinel_cmp = (flat_cmp < 0).unsqueeze(-1)
+                    cmp_bf16 = torch.where(
+                        sentinel_cmp,
+                        torch.zeros((), dtype=cmp_bf16.dtype, device=cmp_bf16.device),
+                        cmp_bf16,
+                    )
+                    cmp_kv_for_gather = cmp_bf16  # [T*K_cmp, 512]
+                    cmp_global = torch.arange(
+                        cmp_bf16.shape[0],
+                        device=cmp_global.device,
+                        dtype=cmp_global.dtype,
+                    ).view(cmp_global.shape)
+                elif cmp_view_cache is not None and cmp_view_cache.dtype == torch.uint8:
+                    from rtp_llm.models_py.modules.dsv4._swa_fp8_pack import (
+                        unpack_swa_fp8,
+                    )
+
+                    cmp_kv_for_gather = unpack_swa_fp8(cmp_view_cache)
                 kv_packed_4d = gather_dual_pool_kv_packed(
-                    swa_view_cache,
-                    cmp_view_cache,
+                    swa_kv_for_gather,
+                    cmp_kv_for_gather,
                     swa_global,
                     cmp_global,
                     self.head_dim,
@@ -1819,6 +2071,7 @@ class Attention(nn.Module):
         sequence_lengths=None,
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[int, torch.Tensor]] = None,
+        attn_inputs: Optional[Any] = None,
     ) -> torch.Tensor:
         """qwen3-style: ``kv_cache`` (framework KVCache handle) and
         ``block_tables_by_type`` (per-request, per-attn_type block tables)
@@ -1839,21 +2092,27 @@ class Attention(nn.Module):
         """
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
+        prev_ai = getattr(self, "_attn_inputs", None)
+
         if kv_cache is not None:
             self._kv_cache = kv_cache
         if block_tables_by_type is not None:
             self._block_tables_by_type = block_tables_by_type
+        self._attn_inputs = attn_inputs
         was_flat = x.dim() == 2
         x_in = x.unsqueeze(0) if was_flat else x
         try:
             self._set_compressor_pool_context()
             try:
-                out = self._forward_prefill(x_in, start_pos, sequence_lengths)
+                out = self._forward_prefill(
+                    x_in, start_pos, sequence_lengths, attn_inputs
+                )
             finally:
                 self._clear_compressor_pool_context()
         finally:
             self._kv_cache = prev_kv
             self._block_tables_by_type = prev_bt
+            self._attn_inputs = prev_ai
         if out is NotImplemented:
             return out
         return out.squeeze(0) if was_flat else out
@@ -2361,9 +2620,7 @@ class Attention(nn.Module):
             # outer ``forward`` wrapper in its try/finally.
             if common.debug_enabled:
                 self.compressor._dbg_prefix = f"L{self.layer_id:02d}_attn_cmp"
-            kv_compress = self.compressor(
-                x, start_pos, sequence_lengths=sequence_lengths
-            )
+            kv_compress = self.compressor(x, start_pos)
             if common.debug_enabled:
                 self.compressor._dbg_prefix = None
             if kv_compress is not None:
@@ -2397,24 +2654,20 @@ class Attention(nn.Module):
     ):
         """FP8 KV-cache prefill dispatcher.
 
-        Layer-0 / SWA-only is implemented; CSA / HCA (compress_ratio in
-        {4, 128}) still raise NotImplementedError so HACK_LAYER_NUM=2..4
-        with FP8 KV cache fail loudly at the right module rather than
-        silently returning the Python ``NotImplemented`` sentinel.
+        SWA-only layers (compress_ratio==0) take the dedicated
+        ``flash_mla_sparse_fwd`` path. CSA/HCA layers run the same body as
+        BF16 prefill — the FP8 wiring lives below the layer surface:
+        ``_prefill_write_swa_to_pool`` quant-packs the SWA 584B pool;
+        ``Compressor`` (PP4) writes the indexer 132B FP8 pool directly via
+        the fused kernel when bound to it, and the attention-side CSA/HCA
+        compressor's bf16 kv_cache scatter rides the per-row e4m3 pack/unpack
+        in ``kv_cache_utils.py``.
         """
         if self.compress_ratio == 0:
             return self._forward_prefill_fp8_swa_only(
                 x, start_pos, sequence_lengths, common, qkv
             )
-        raise NotImplementedError(
-            "DSv4 FP8 prefill for compress_ratio > 0 (CSA/HCA) is not yet "
-            f"implemented (layer_id={self.layer_id}, "
-            f"compress_ratio={self.compress_ratio}). Only SWA-only layers "
-            "(layer 0) are supported with FP8 KV cache so far. "
-            "Run with HACK_LAYER_NUM=1 + FP8_KV_CACHE=1 to exercise the "
-            "implemented path; full-stack FP8 prefill lands in a follow-up "
-            "patch (Compressor / Indexer FP8 cache wiring)."
-        )
+        return self._forward_prefill_bf16(x, start_pos, sequence_lengths, common, qkv)
 
     def _forward_prefill_fp8_swa_only(
         self,
