@@ -394,6 +394,47 @@ def h20_oss_suites():
     )
 
 
+    # H20 MiniMax-M2
+    native.test_suite(
+        name = "smoke_h20_minimax_m2",
+        tests = [
+            smoke_test(
+                name="minimax_m2_fp8_tp4",
+                task_info="data/model/minimax_m2/q_r_fp8_tp4.json",
+                smoke_args="--act_type BF16 --quantization FP8_PER_BLOCK --moe_strategy fp8_per_block_no_dp_masked --use_deepep_moe 0 --tp_size 4 --max_seq_len 4096 --seq_size_per_block 64 --warm_up 0 --reserver_runtime_mem_mb 8192",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="minimax_m2_pd",
+                task_info="data/model/minimax_m2/q_r_fp8_pd_sep.json",
+                smoke_args= {
+                    "prefill": "--act_type BF16 --quantization FP8_PER_BLOCK --moe_strategy fp8_per_block_no_dp_masked --use_deepep_moe 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 4 --max_seq_len 4096 --seq_size_per_block 64 --warm_up 0 --reserver_runtime_mem_mb 8192",
+                    "decode": "--act_type BF16 --quantization FP8_PER_BLOCK --moe_strategy fp8_per_block_no_dp_masked --use_deepep_moe 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 4 --max_seq_len 4096 --seq_size_per_block 64 --warm_up 0 --reserver_runtime_mem_mb 8192"
+                },
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="minimax_m2_cudagraph",
+                task_info="data/model/minimax_m2/q_r_fp8_tp4_cudagraph.json",
+                smoke_args="--act_type BF16 --quantization FP8_PER_BLOCK --moe_strategy fp8_per_block_no_dp_masked --use_deepep_moe 0 --tp_size 4 --max_seq_len 4096 --seq_size_per_block 64 --warm_up 0 --reserver_runtime_mem_mb 8192 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4' --concurrency_limit 4",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="minimax_m2_reuse_cache",
+                task_info="data/model/minimax_m2/q_r_fp8_tp4_reuse_cache.json",
+                smoke_args="--act_type BF16 --quantization FP8_PER_BLOCK --moe_strategy fp8_per_block_no_dp_masked --use_deepep_moe 0 --tp_size 4 --max_seq_len 4096 --seq_size_per_block 64 --warm_up 0 --reserver_runtime_mem_mb 8192 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 2048 --write_cache_sync 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="minimax_m2_tool_call",
+                task_info="data/model/minimax_m2/q_r_fp8_tp4_tool_call.json",
+                smoke_args="--act_type BF16 --quantization FP8_PER_BLOCK --moe_strategy fp8_per_block_no_dp_masked --use_deepep_moe 0 --tp_size 4 --max_seq_len 4096 --seq_size_per_block 64 --warm_up 0 --reserver_runtime_mem_mb 8192",
+                gpu_type=["H20"],
+            ),
+        ],
+    )
+
+
     # H20 Eagle (Qwen2-14B + draft model)
     native.test_suite(
         name = "smoke_h20_eagle",

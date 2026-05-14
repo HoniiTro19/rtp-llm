@@ -1,0 +1,190 @@
+{
+    "model_type": "minimax_m2",
+    "model_path": "/mnt/nas1/hf/MiniMax-M2.7",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1778413462,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "The user asks: \"以英语听力方法为主题提出几个问题\". This is Chinese: \"Based on the theme of English listening methods, propose several questions.\" So they want me to propose several questions about English listening methods. Likely they want a list of questions that could be used for discussion, research, or maybe for a quiz. The user wants \"以英语听力方法为主题提出几个问题\". So we need to produce several questions (maybe 5-10) about English listening methods. The",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 46,
+                    "total_tokens": 146,
+                    "completion_tokens": 100,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 100
+                    },
+                    "prompt_tokens_details": null
+                },
+                "aux_info": {
+                    "cost_time": 26031.06,
+                    "iter_count": 100,
+                    "prefix_len": 0,
+                    "input_len": 46,
+                    "output_len": 100,
+                    "step_output_len": 100,
+                    "first_token_cost_time": 12528.524,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s1",
+                    "$prompt:s1",
+                    "$prompt:s1"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "</h2>\n<p>CAP theorem also called",
+                        "finished": true,
+                        "aux_info": {
+                            "cost_time": 1067.815,
+                            "iter_count": 10,
+                            "prefix_len": 0,
+                            "input_len": 5,
+                            "output_len": 10,
+                            "step_output_len": 10,
+                            "first_token_cost_time": 116.966,
+                            "wait_time": 0.0,
+                            "pd_sep": false,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "softmax_probs": [],
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "role_addrs": [],
+                            "aux_string": ""
+                        }
+                    },
+                    {
+                        "response": "</h2>\n<p>CAP theorem also called",
+                        "finished": true,
+                        "aux_info": {
+                            "cost_time": 2146.462,
+                            "iter_count": 10,
+                            "prefix_len": 0,
+                            "input_len": 5,
+                            "output_len": 10,
+                            "step_output_len": 10,
+                            "first_token_cost_time": 1176.607,
+                            "wait_time": 0.0,
+                            "pd_sep": false,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "softmax_probs": [],
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "role_addrs": [],
+                            "aux_string": ""
+                        }
+                    },
+                    {
+                        "response": "</h2>\n<p>CAP theorem also called",
+                        "finished": true,
+                        "aux_info": {
+                            "cost_time": 2146.403,
+                            "iter_count": 10,
+                            "prefix_len": 0,
+                            "input_len": 5,
+                            "output_len": 10,
+                            "step_output_len": 10,
+                            "first_token_cost_time": 1176.54,
+                            "wait_time": 0.0,
+                            "pd_sep": false,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "softmax_probs": [],
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "role_addrs": [],
+                            "aux_string": ""
+                        }
+                    }
+                ]
+            }
+        }
+    ]
+}

@@ -77,3 +77,10 @@ py_test (
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+    name = "layerwise_qk_norm_test",
+    srcs = ["layerwise_qk_norm_test.py"],
+    deps = py_test_deps,
+    exec_properties = {'gpu':'H20'},
+)

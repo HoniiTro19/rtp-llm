@@ -1,0 +1,95 @@
+{
+    "model_type": "minimax_m2",
+    "model_path": "/mnt/nas1/hf/MiniMax-M2.7",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:m2"
+                    }
+                ],
+                "max_tokens": 20,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1779160262,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "The user is asking me to improve some dialogue about death and the afterlife, specifically about three things:",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 189,
+                    "total_tokens": 209,
+                    "completion_tokens": 20,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 20
+                    },
+                    "prompt_tokens_details": null
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:m2"
+                    }
+                ],
+                "max_tokens": 20,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1779160265,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "The user is asking me to improve some dialogue about death and afterlife, focusing on three things: spirit",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 189,
+                    "total_tokens": 209,
+                    "completion_tokens": 20,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 20
+                    },
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": 128
+                    }
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,306 @@
+{
+    "_comment": "End-to-end tool-calling smoke for MiniMax-M2. Three queries cover MinimaxM2Detector + MinimaxM2Renderer's critical paths: (Q0) non-stream tool_call via detect_and_parse, (Q1) stream=true via parse_streaming_increment, (Q2) multi-turn with assistant tool_calls + role=tool result so the chat_template renders <minimax:tool_call>...</minimax:tool_call> + ]~b]tool / <response> sections — model should reply with text and not call any tool. M2 always emits reasoning (<think>...</think>) so reasoning_content is expected to be a non-empty string. Regenerate `result` blocks with SAVE_RESPONSE=True.",
+    "model_type": "minimax_m2",
+    "model_path": "/mnt/nas1/hf/MiniMax-M2.7",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant. You have access to the provided tools. When the user asks a question that requires real-time, location-specific, or external information that you cannot answer from your own knowledge (for example current weather), you MUST call the appropriate tool with concrete arguments instead of guessing or asking the user. Do not output any explanation before the tool call.",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "What's the current weather in San Francisco right now? Use celsius.",
+                        "partial": false
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "description": "Get the current weather conditions for a given city. Returns temperature, humidity and a short text description.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The city name, e.g. 'San Francisco' or 'Beijing'."
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "enum": [
+                                            "celsius",
+                                            "fahrenheit"
+                                        ],
+                                        "description": "Temperature unit to return."
+                                    }
+                                },
+                                "required": [
+                                    "location"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "stream": false,
+                "max_tokens": 256,
+                "extra_configs": {
+                    "top_k": 1,
+                    "temperature": 0.0
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1777441829,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "The user wants to know the current weather in San Francisco using Celsius. I'll use the get_current_weather function with the location set to \"San Francisco\" and unit set to \"celsius\".\n",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_aaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_current_weather",
+                                        "arguments": "{\"location\": \"San Francisco\", \"unit\": \"celsius\"}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 315,
+                    "total_tokens": 394,
+                    "completion_tokens": 79,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 39
+                    },
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 8801.765,
+                    "iter_count": 79,
+                    "input_len": 315,
+                    "output_len": 79,
+                    "step_output_len": 79,
+                    "first_token_cost_time": 819.38
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant. You have access to the provided tools. When the user asks a question that requires real-time, location-specific, or external information that you cannot answer from your own knowledge (for example current weather), you MUST call the appropriate tool with concrete arguments instead of guessing or asking the user. Do not output any explanation before the tool call.",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "What's the current weather in San Francisco right now? Use celsius.",
+                        "partial": false
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "description": "Get the current weather conditions for a given city. Returns temperature, humidity and a short text description.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The city name, e.g. 'San Francisco' or 'Beijing'."
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "enum": [
+                                            "celsius",
+                                            "fahrenheit"
+                                        ],
+                                        "description": "Temperature unit to return."
+                                    }
+                                },
+                                "required": [
+                                    "location"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "stream": true,
+                "max_tokens": 256,
+                "extra_configs": {
+                    "top_k": 1,
+                    "temperature": 0.0
+                }
+            },
+            "result": {
+                "id": "chat",
+                "object": "chat.completion.chunk",
+                "created": 1777441830,
+                "model": null,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "\n\n\n",
+                            "reasoning_content": "The user wants to know the current weather in San Francisco using Celsius. I'll use the get_current_weather function with the location set to \"San Francisco\" and unit set to \"celsius\".\n",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_aaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_current_weather",
+                                        "arguments": "{\"location\": \"San Francisco\", \"unit\": \"celsius\"}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 315,
+                    "total_tokens": 394,
+                    "completion_tokens": 79,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 39
+                    }
+                },
+                "debug_info": null,
+                "aux_info": null,
+                "extra_outputs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant. You have access to the provided tools. Always call a tool when one is appropriate, otherwise reply normally.",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "What's the current weather in San Francisco right now? Use celsius.",
+                        "partial": false
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "get_current_weather:0",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_current_weather",
+                                    "arguments": "{\"location\": \"San Francisco\", \"unit\": \"celsius\"}"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "get_current_weather:0",
+                        "content": "{\"location\": \"San Francisco\", \"unit\": \"celsius\", \"temperature\": 17, \"humidity\": 72, \"description\": \"partly cloudy\"}"
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "description": "Get the current weather conditions for a given city. Returns temperature, humidity and a short text description.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The city name."
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "enum": [
+                                            "celsius",
+                                            "fahrenheit"
+                                        ],
+                                        "description": "Temperature unit to return."
+                                    }
+                                },
+                                "required": [
+                                    "location"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "stream": false,
+                "max_tokens": 256,
+                "extra_configs": {
+                    "top_k": 1,
+                    "temperature": 0.0
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1777441831,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The current weather in San Francisco is:\n\n- **Temperature:** 17°C\n- **Humidity:** 72%\n- **Conditions:** Partly cloudy\n\nIt's a mild day in San Francisco with some clouds in the sky!",
+                            "reasoning_content": "The weather tool returned the current weather information for San Francisco. Let me provide this information to the user in a clear and helpful way.\n"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 346,
+                    "total_tokens": 422,
+                    "completion_tokens": 76,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 27
+                    },
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 7643.43,
+                    "iter_count": 76,
+                    "input_len": 346,
+                    "output_len": 76,
+                    "step_output_len": 76,
+                    "first_token_cost_time": 115.523
+                },
+                "extra_outputs": null
+            }
+        }
+    ]
+}
