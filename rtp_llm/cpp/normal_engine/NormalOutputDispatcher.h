@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <vector>
 
 #include <torch/all.h>
@@ -16,10 +15,6 @@ public:
     ~NormalOutputDispatcher() = default;
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
-
-    void invokeBatchAcceptTokens(const StreamGroups&                                                  stream_groups,
-                                 const std::function<std::vector<int32_t>(const GenerateStreamPtr&)>& extract_tokens,
-                                 const char*                                                          log_prefix) const;
 
 private:
     void dispatchSingleStream(GenerateStreamPtr    stream,

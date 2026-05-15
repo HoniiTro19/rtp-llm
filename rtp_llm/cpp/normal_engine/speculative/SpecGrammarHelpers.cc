@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 
+#include "rtp_llm/cpp/engine_base/grammar/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
@@ -12,18 +13,7 @@ namespace rtp_llm {
 namespace spec_grammar {
 
 DLTensor makeBitmaskView(int32_t* data, int32_t batch_size, int32_t words) {
-    DLTensor dl;
-    dl.data        = data;
-    dl.device      = DLDevice{kDLCPU, 0};
-    dl.ndim        = 2;
-    dl.dtype       = DLDataType{kDLInt, 32, 1};
-    static thread_local int64_t shape[2];
-    shape[0]       = batch_size;
-    shape[1]       = words;
-    dl.shape       = shape;
-    dl.strides     = nullptr;
-    dl.byte_offset = 0;
-    return dl;
+    return GrammarLogitsProcessor::makeBitmaskView(data, batch_size, words);
 }
 
 bool tokenAllowed(const int32_t* bitmask, int32_t tok, int32_t vocab_size) {
@@ -53,7 +43,8 @@ std::vector<ActiveGrammarStream> collectActiveGrammarStreams(
     const int*                       base_ptr = chain_tensor.data_ptr<int>();
     int                              stream_idx = 0;
     for (auto& stream : stream_groups.allStreams()) {
-        RtpGrammarMatcher* m = stream->tryGetGrammarMatcher();
+        auto*              gp = stream->findGrammarProcessor();
+        RtpGrammarMatcher* m  = gp ? gp->grammarMatcher() : nullptr;
         if (m && !m->isTerminated() && !m->finished()) {
             ActiveGrammarStream a;
             a.batch_idx = stream_idx;

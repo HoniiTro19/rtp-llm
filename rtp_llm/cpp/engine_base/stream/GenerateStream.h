@@ -22,11 +22,8 @@
 
 namespace rtp_llm {
 
-// Per-stream grammar matcher. Forward declared so this header does not pull in
-// the xgrammar headers (and therefore does not force every TU that includes
-// GenerateStream.h to also link xgrammar). The full type is required only by
-// the dtor and accessor implementations in GenerateStream.cc.
 class RtpGrammarMatcher;
+class GrammarLogitsProcessor;
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 
@@ -454,14 +451,9 @@ public:
         return generator_;
     }
 
-    // ---- Grammar matcher accessors ----------------------------------------
-    //
-    // The grammar matcher lives inside a GrammarLogitsProcessor in the
-    // logits_processor_list_. These accessors delegate to it via
-    // BaseLogitsProcessor::grammarMatcher() virtual dispatch.
-    bool               hasGrammarMatcher() const noexcept;
-    RtpGrammarMatcher* tryGetGrammarMatcher() const noexcept;
-    void               clearGrammarMatcher() noexcept;
+    GrammarLogitsProcessor* findGrammarProcessor() const noexcept;
+    bool                    hasGrammarMatcher() const noexcept;
+    void                    clearGrammarMatcher() noexcept;
 
     torch::Tensor getProposeTokens() const {
         if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens.defined()) {

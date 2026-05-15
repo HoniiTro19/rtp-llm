@@ -6,6 +6,7 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/engine_base/grammar/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -950,8 +951,8 @@ void GenerateStream::reportStreamMetrics() {
             // the request used grammar. The matcher is single-threaded by
             // construction (one stream owner), so reading stats without
             // additional sync is safe at end-of-stream.
-            if (auto* matcher = tryGetGrammarMatcher(); matcher != nullptr) {
-                const auto& gs                       = matcher->stats();
+            if (auto* gp = findGrammarProcessor()) {
+                const auto& gs                       = gp->grammarMatcher()->stats();
                 collector.grammar_used_qps           = true;
                 collector.grammar_cache_hit_qps      = gs.cache_hit;
                 collector.grammar_cache_miss_qps     = !gs.cache_hit;
@@ -1029,22 +1030,17 @@ GenerateStream::~GenerateStream() {
     stream_magic_ = 0;
 }
 
-bool GenerateStream::hasGrammarMatcher() const noexcept {
+GrammarLogitsProcessor* GenerateStream::findGrammarProcessor() const noexcept {
     for (const auto& p : logits_processor_list_) {
         if (p->grammarMatcher() != nullptr) {
-            return true;
-        }
-    }
-    return false;
-}
-
-RtpGrammarMatcher* GenerateStream::tryGetGrammarMatcher() const noexcept {
-    for (const auto& p : logits_processor_list_) {
-        if (auto* m = p->grammarMatcher()) {
-            return m;
+            return static_cast<GrammarLogitsProcessor*>(p.get());
         }
     }
     return nullptr;
+}
+
+bool GenerateStream::hasGrammarMatcher() const noexcept {
+    return findGrammarProcessor() != nullptr;
 }
 
 void GenerateStream::clearGrammarMatcher() noexcept {

@@ -1,8 +1,8 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
+#include "rtp_llm/cpp/engine_base/grammar/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpecGrammarHelpers.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
@@ -24,44 +24,21 @@ MtpBatchStreamProcessor::MtpBatchStreamProcessor(const ModelConfig&             
                                                  const SpeculativeExecutionConfig&  sp_config,
                                                  bool                               warm_up):
     NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-    propose_step_(sp_config.gen_num_per_cycle) {
-    if (Py_IsInitialized()) {
-        py::gil_scoped_acquire acquire;
-        try {
-            triton_bitmask_ops_ = py::module_::import("rtp_llm.models_py.triton_kernels.grammar.bitmask_ops");
-        } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_WARNING("MtpBatchStreamProcessor: failed to import bitmask_ops (%s)", e.what());
-        }
-    }
-}
+    propose_step_(sp_config.gen_num_per_cycle) {}
 
-MtpBatchStreamProcessor::~MtpBatchStreamProcessor() {
-    if (!triton_bitmask_ops_) {
-        return;
-    }
-    if (Py_IsInitialized()) {
-        py::gil_scoped_acquire acquire;
-        triton_bitmask_ops_ = py::module_();
-    } else {
-        (void)triton_bitmask_ops_.release();
-    }
-}
+namespace {
 
-bool MtpBatchStreamProcessor::reportGrammarUnavailableIfNeeded(const StreamGroups& stream_groups) const {
-    if (triton_bitmask_ops_) {
-        return false;
-    }
-    if (!Py_IsInitialized()) {
-        return true;
-    }
+const py::module_& findTritonBitmaskOps(const StreamGroups& stream_groups) {
     for (auto& stream : stream_groups.allStreams()) {
-        if (stream->hasGrammarMatcher()) {
-            stream->reportError(ErrorCode::EXECUTION_EXCEPTION,
-                                "grammar bitmask kernel unavailable: triton import failed");
+        if (auto* gp = stream->findGrammarProcessor()) {
+            return gp->tritonBitmaskOps();
         }
     }
-    return true;
+    static const py::module_ empty;
+    return empty;
 }
+
+}  // namespace
 
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
@@ -579,7 +556,9 @@ void MtpBatchStreamProcessor::applySpecGrammarConstraints(SamplerInputs&       i
                                                           const torch::Tensor& draft_token_ids,
                                                           size_t               propose_step) const {
     if (!spec_grammar::streamGroupsHaveAttachedGrammar(stream_groups)) return;
-    if (reportGrammarUnavailableIfNeeded(stream_groups)) return;
+
+    const auto& triton_ops = findTritonBitmaskOps(stream_groups);
+    if (!triton_ops) return;
 
     int32_t vocab_size = -1;
     auto    active     = spec_grammar::collectActiveGrammarStreams(
@@ -588,17 +567,13 @@ void MtpBatchStreamProcessor::applySpecGrammarConstraints(SamplerInputs&       i
 
     const size_t  score_len  = propose_step + 1;
     const int32_t words      = (vocab_size + 31) / 32;
-    const int     total_rows = static_cast<int>(inputs.logits.size(0));  // batch*score_len
+    const int     total_rows = static_cast<int>(inputs.logits.size(0));
 
     auto     bitmask = at::full({total_rows, words}, /*fill_value=*/-1, at::dtype(at::kInt));
-    DLTensor dl      = spec_grammar::makeBitmaskView(bitmask.data_ptr<int32_t>(), total_rows, words);
+    DLTensor dl      = GrammarLogitsProcessor::makeBitmaskView(bitmask.data_ptr<int32_t>(), total_rows, words);
     int32_t* bm_data = bitmask.data_ptr<int32_t>();
 
     auto poisonRow = [&](int row) {
-        // All-zero except a single bit on the padding token forces the
-        // sampler to pick it; downstream batchAccept will then reject and
-        // surface the error. (vs leaving all-allow which lets the sampler
-        // pick freely — keeps existing strict semantics.)
         int32_t* p = bm_data + row * words;
         std::memset(p, 0, sizeof(int32_t) * words);
         p[0] = 1;
@@ -616,7 +591,7 @@ void MtpBatchStreamProcessor::applySpecGrammarConstraints(SamplerInputs&       i
                 if (!a.matcher->isPassthroughForMask()) {
                     a.matcher->fillBitmask(&dl, row_base + static_cast<int>(pos));
                 }
-                if (pos == score_len - 1) break;  // last row: no chain accept needed
+                if (pos == score_len - 1) break;
 
                 const int32_t  tok      = a.chain_ptr[pos];
                 const int32_t* row_data = bm_data + (row_base + static_cast<int>(pos)) * words;
@@ -639,13 +614,7 @@ void MtpBatchStreamProcessor::applySpecGrammarConstraints(SamplerInputs&       i
         }
     }
 
-    // One D2H + one kernel call for the whole batch.
-    auto bm_gpu = bitmask.to(inputs.logits.device(), /*non_blocking=*/true);
-    auto target_logits =
-        inputs.logits.size(1) > vocab_size ? inputs.logits.slice(/*dim=*/1, 0, vocab_size) : inputs.logits;
-    py::gil_scoped_acquire acquire;
-    triton_bitmask_ops_.attr("apply_token_bitmask_inplace_triton")(
-        convertTensorToObject(target_logits), convertTensorToObject(bm_gpu));
+    GrammarLogitsProcessor::applyBitmaskToLogits(triton_ops, inputs.logits, bitmask, vocab_size);
 }
 
 // Pre-draft mask: replay each matcher's tokens_so_far[1..] (skip T0, which
@@ -664,7 +633,9 @@ void MtpBatchStreamProcessor::applyDraftGrammarConstraints(torch::Tensor&       
                                                            const torch::Tensor& draft_tokens_so_far,
                                                            int                  step_idx) const {
     if (!spec_grammar::streamGroupsHaveAttachedGrammar(stream_groups)) return;
-    if (reportGrammarUnavailableIfNeeded(stream_groups)) return;
+
+    const auto& triton_ops = findTritonBitmaskOps(stream_groups);
+    if (!triton_ops) return;
 
     int32_t vocab_size = -1;
     auto    active     = spec_grammar::collectActiveGrammarStreams(
@@ -679,7 +650,7 @@ void MtpBatchStreamProcessor::applyDraftGrammarConstraints(torch::Tensor&       
     const int     batch_size = static_cast<int>(logits.size(0));
     const int32_t words      = (vocab_size + 31) / 32;
     auto     bitmask = at::full({batch_size, words}, /*fill_value=*/-1, at::dtype(at::kInt));
-    DLTensor dl      = spec_grammar::makeBitmaskView(bitmask.data_ptr<int32_t>(), batch_size, words);
+    DLTensor dl      = GrammarLogitsProcessor::makeBitmaskView(bitmask.data_ptr<int32_t>(), batch_size, words);
     int32_t* bm_data = bitmask.data_ptr<int32_t>();
 
     auto poisonRow = [&](int row) {
@@ -694,7 +665,6 @@ void MtpBatchStreamProcessor::applyDraftGrammarConstraints(torch::Tensor&       
             for (size_t i = 1; i < a.chain_len; ++i) {
                 const int32_t tok = a.chain_ptr[i];
                 if (tok < 0 || tok >= vocab_size) break;
-                // Probe the next mask using the matcher's current state.
                 std::memset(bm_data + a.batch_idx * words, 0xff, sizeof(int32_t) * words);
                 a.matcher->fillBitmask(&dl, a.batch_idx);
                 if (!spec_grammar::tokenAllowed(bm_data + a.batch_idx * words, tok, vocab_size)) break;
@@ -705,7 +675,6 @@ void MtpBatchStreamProcessor::applyDraftGrammarConstraints(torch::Tensor&       
             if (a.matcher->isTerminated()) {
                 poisonRow(a.batch_idx);
             } else {
-                // Final fill is the actual mask we want applied to the draft logit row.
                 std::memset(bm_data + a.batch_idx * words, 0xff, sizeof(int32_t) * words);
                 a.matcher->fillBitmask(&dl, a.batch_idx);
             }
@@ -719,36 +688,23 @@ void MtpBatchStreamProcessor::applyDraftGrammarConstraints(torch::Tensor&       
         }
     }
 
-    auto bm_gpu = bitmask.to(logits.device(), /*non_blocking=*/true);
-    auto target_logits =
-        logits.size(1) > vocab_size ? logits.slice(/*dim=*/1, 0, vocab_size) : logits;
-    py::gil_scoped_acquire acquire;
-    triton_bitmask_ops_.attr("apply_token_bitmask_inplace_triton")(
-        convertTensorToObject(target_logits), convertTensorToObject(bm_gpu));
+    GrammarLogitsProcessor::applyBitmaskToLogits(triton_ops, logits, bitmask, vocab_size);
 }
 
 void MtpBatchStreamProcessor::batchAcceptSpecGrammarTokens(
     const StreamGroups& stream_groups, const speculative::SpeculativeSamplerOutput& spec_output) const {
-    // stream_idx tracks position in stream_groups.allStreams() iteration, which
-    // matches the layout of spec_output.accept_len / accept_tokens. The closure
-    // must advance this counter on EVERY stream (grammar or not) to stay in
-    // lock-step with the spec_output arrays.
     int stream_idx = 0;
-    outputDispatcher()->invokeBatchAcceptTokens(
-        stream_groups,
-        [&](const GenerateStreamPtr&) -> std::vector<int32_t> {
-            const size_t accept_len = spec_output.accept_len[stream_idx];
-            const int*   token_ptr  = spec_output.accept_tokens[stream_idx].data_ptr<int>();
+    for (auto& stream : stream_groups.allStreams()) {
+        const size_t accept_len = spec_output.accept_len[stream_idx];
+        const int*   token_ptr  = spec_output.accept_tokens[stream_idx].data_ptr<int>();
 
-            std::vector<int32_t> out;
-            out.reserve(accept_len);
-            for (size_t k = 0; k < accept_len; ++k) {
-                out.push_back(token_ptr[k]);
-            }
-            ++stream_idx;
-            return out;
-        },
-        "xgrammar spec_accept");
+        auto* gp = stream->findGrammarProcessor();
+        if (gp && accept_len > 0) {
+            std::vector<int32_t> tokens(token_ptr, token_ptr + accept_len);
+            gp->acceptTokens(tokens);
+        }
+        ++stream_idx;
+    }
 }
 
 }  // namespace rtp_llm

@@ -3,7 +3,6 @@
 #include <list>
 #include <memory>
 
-#include <pybind11/pybind11.h>
 #include <torch/all.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -14,8 +13,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
-
-namespace py = pybind11;
 
 namespace rtp_llm {
 
@@ -34,8 +31,6 @@ public:
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                               const GptModelInputs&  model_inputs,
                                                               const GptModelOutputs& model_output) const;
-
-    NormalOutputDispatcher* outputDispatcher() const { return output_dispatcher_.get(); }
 
 protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,

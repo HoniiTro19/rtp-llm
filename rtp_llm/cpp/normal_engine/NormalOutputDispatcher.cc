@@ -1,9 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
-#include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
-#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
@@ -162,42 +160,6 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     loss,
                     src_batch_indices,
                     all_hidden_states});
-}
-
-void NormalOutputDispatcher::invokeBatchAcceptTokens(
-    const StreamGroups&                                                  stream_groups,
-    const std::function<std::vector<int32_t>(const GenerateStreamPtr&)>& extract_tokens,
-    const char*                                                          log_prefix) const {
-    RTP_LLM_PROFILE_SCOPE("grammar.acceptTokens");
-    for (auto& stream : stream_groups.allStreams()) {
-        std::vector<int32_t> token_ids = extract_tokens(stream);
-        if (token_ids.empty()) {
-            continue;
-        }
-        RtpGrammarMatcher* matcher = stream->tryGetGrammarMatcher();
-        if (matcher == nullptr) {
-            continue;
-        }
-
-        for (int32_t tok : token_ids) {
-            if (!matcher->acceptToken(tok)) {
-                RTP_LLM_LOG_WARNING(
-                    "[%s] stream [%ld] grammar parser rejected token %d", log_prefix, stream->streamId(), tok);
-                stream->reportError(ErrorCode::INVALID_PARAMS,
-                                    "grammar accept_token error: parser rejected token "
-                                        + std::to_string(tok));
-                break;
-            }
-        }
-        if (matcher->isTerminated()) {
-            matcher->markFinished();
-            if (stream->isActive()) {
-                stream->reportEvent(StreamEvents::GenerateDone);
-            }
-        } else if (!stream->isActive()) {
-            matcher->markFinished();
-        }
-    }
 }
 
 }  // namespace rtp_llm

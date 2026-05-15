@@ -14,19 +14,12 @@ public:
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
                             bool                               warm_up);
-    ~MtpBatchStreamProcessor() override;
 
     void applySpecGrammarConstraints(SamplerInputs&       inputs,
                                      const StreamGroups&  stream_groups,
                                      const torch::Tensor& draft_token_ids,
                                      size_t               propose_step) const;
 
-    // Mask draft logits at a single chain position. draft_tokens_so_far is
-    // [batch, step_idx+1]: col 0 is T0 (already accepted by prefill); cols
-    // 1..step_idx are draft tokens sampled earlier in this draftModelDecode
-    // invocation. The Python helper walks cols 1.. with accept_token, fills +
-    // applies the bitmask, then rolls back — matcher state at return equals
-    // state at entry.
     void applyDraftGrammarConstraints(torch::Tensor&       logits,
                                       const StreamGroups&  stream_groups,
                                       const torch::Tensor& draft_tokens_so_far,
@@ -98,10 +91,6 @@ protected:
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
-    bool reportGrammarUnavailableIfNeeded(const StreamGroups& stream_groups) const;
-
-protected:
-    int         propose_step_;
-    py::module_ triton_bitmask_ops_;
+    int propose_step_;
 };
 }  // namespace rtp_llm
