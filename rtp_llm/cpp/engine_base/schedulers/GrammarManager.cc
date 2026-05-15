@@ -10,8 +10,12 @@
 #include <unordered_set>
 #include <utility>
 
+#include <pybind11/pybind11.h>
+#include "rtp_llm/cpp/engine_base/grammar/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+
+namespace py = pybind11;
 
 namespace rtp_llm {
 
@@ -173,7 +177,21 @@ void GrammarManager::installMatcherOnStream(const GenerateStreamPtr&            
     matcher->mutableStats().dispatch_type   = key.key_type;
     matcher->initReasoning(require_reasoning);
     replayPrefillTokensToGrammar(stream, *matcher);
-    stream->setGrammarMatcher(std::move(matcher));
+
+    if (!triton_bitmask_ops_) {
+        if (Py_IsInitialized()) {
+            py::gil_scoped_acquire acquire;
+            try {
+                triton_bitmask_ops_ = py::module_::import("rtp_llm.models_py.triton_kernels.grammar.bitmask_ops");
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_WARNING("failed to import grammar bitmask_ops (%s)", e.what());
+            }
+        }
+    }
+
+    auto processor = std::make_shared<GrammarLogitsProcessor>(
+        std::move(matcher), triton_bitmask_ops_, stream);
+    stream->addLogitsProcessor(std::move(processor));
 }
 
 bool GrammarManager::processReqWithGrammar(const GenerateStreamPtr& stream) {

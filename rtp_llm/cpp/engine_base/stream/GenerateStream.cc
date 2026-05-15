@@ -1023,40 +1023,35 @@ int GenerateStream::reuseBlockSize() const {
     return reuse_length / seq_size_per_block;
 }
 
-// Grammar accessors are now pure C++ — RtpGrammarMatcher is owned exclusively
-// by this stream and contains no Python state. None of the four entry points
-// here acquires the GIL.
-//
-// Concurrency: setGrammarMatcher / clearGrammarMatcher run on the scheduler
-// thread between ticks; the read accessors run on the executor thread
-// (NormalBatchStreamProcessor / NormalOutputDispatcher / spec variants)
-// during a tick. The two phases are serialized by the engine's main loop, so
-// there is no concurrent reader+writer today. If a future change introduces
-// cross-thread access, replace the unique_ptr with std::atomic<RtpGrammarMatcher*>
-// and arrange the lifetime accordingly.
-
 GenerateStream::~GenerateStream() {
-    // matcher_ is std::unique_ptr<RtpGrammarMatcher>: pure C++ destructor,
-    // zero GIL, safe in cc_test binaries with no Python interpreter.
     reportMetric();
     releaseResource();
     stream_magic_ = 0;
 }
 
-void GenerateStream::setGrammarMatcher(std::shared_ptr<RtpGrammarMatcher> matcher) {
-    matcher_ = std::move(matcher);
-}
-
 bool GenerateStream::hasGrammarMatcher() const noexcept {
-    return matcher_ != nullptr;
+    for (const auto& p : logits_processor_list_) {
+        if (p->grammarMatcher() != nullptr) {
+            return true;
+        }
+    }
+    return false;
 }
 
 RtpGrammarMatcher* GenerateStream::tryGetGrammarMatcher() const noexcept {
-    return matcher_.get();
+    for (const auto& p : logits_processor_list_) {
+        if (auto* m = p->grammarMatcher()) {
+            return m;
+        }
+    }
+    return nullptr;
 }
 
 void GenerateStream::clearGrammarMatcher() noexcept {
-    matcher_.reset();
+    logits_processor_list_.erase(
+        std::remove_if(logits_processor_list_.begin(), logits_processor_list_.end(),
+                       [](const BaseLogitsProcessorPtr& p) { return p->grammarMatcher() != nullptr; }),
+        logits_processor_list_.end());
 }
 
 void GenerateStream::setSeqLength(int seq_length) {

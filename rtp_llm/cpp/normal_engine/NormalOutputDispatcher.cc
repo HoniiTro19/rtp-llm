@@ -12,32 +12,12 @@
 
 namespace rtp_llm {
 
-NormalOutputDispatcher::~NormalOutputDispatcher() {
-    close();
-}
-
-void NormalOutputDispatcher::close() noexcept {
-    if (!triton_bitmask_ops_) {
-        return;
-    }
-    if (Py_IsInitialized()) {
-        // py::module_() swap runs Py_DECREF on the old handle; needs the GIL.
-        py::gil_scoped_acquire acquire;
-        triton_bitmask_ops_ = py::module_();
-    } else {
-        // Post-finalize: GIL acquire is UB. Deliberately leak.
-        (void)triton_bitmask_ops_.release();
-    }
-}
-
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                               const MergedOutput& merge_outputs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto&  sampler_output       = merge_outputs.sampler_output;
     const size_t total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     RTP_LLM_CHECK(total_batch_size_out == (size_t)sampler_output.token_ids.size(0));
-    // Sampler keeps token_ids/success on GPU to avoid D2H sync mid-sampling;
-    // move to CPU once here for the per-stream loop + grammar accept.
     const torch::Tensor token_ids_cpu =
         sampler_output.token_ids.defined() ? sampler_output.token_ids.cpu() : torch::Tensor();
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
@@ -48,7 +28,6 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool                return_all_probs = stream_groups.needReturnAllProbs();
     auto                new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
-    bool any_grammar = false;
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
@@ -64,18 +43,9 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              token_ids_cpu,
                              success_cpu);
 
-        // Piggyback grammar pre-check: no-grammar path pays only a null check.
-        if (!any_grammar && stream->hasGrammarMatcher()) {
-            any_grammar = true;
-        }
-
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
         token_offset += token_size;
-    }
-
-    if (any_grammar) {
-        batchAcceptGrammarTokens(stream_groups, token_ids_cpu);
     }
 
     RTP_LLM_LOG_DEBUG("dispatch done");
@@ -106,20 +76,16 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     bool has_beam_search = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
     bool has_var_batch   = stream->currentBatchSize() != stream->nextBatchSize();
 
-    // construct mapping from output batches to input batches
     torch::Tensor src_batch_indices;
     if (has_beam_search) {
-        // beam search
         src_batch_indices = sampler_output.beam_index.narrow(0, batch_idx_out, next_batch_size);
     } else if (has_var_batch) {
-        // from context stream to decode straem, there might be other cases in future
         src_batch_indices = torch::zeros({(int64_t)next_batch_size}, torch::kInt32);
     }
     const auto get_src_idx = [&](int32_t dst_idx) {
         return src_batch_indices.defined() ? src_batch_indices.data_ptr<int32_t>()[dst_idx] : dst_idx;
     };
 
-    // construct update info
     torch::Tensor batch_hidden_states;
     if (stream->generateConfig()->return_hidden_states) {
         batch_hidden_states = model_output.hidden_states.narrow(0, batch_idx_in, cur_batch_size);
@@ -203,9 +169,6 @@ void NormalOutputDispatcher::invokeBatchAcceptTokens(
     const std::function<std::vector<int32_t>(const GenerateStreamPtr&)>& extract_tokens,
     const char*                                                          log_prefix) const {
     RTP_LLM_PROFILE_SCOPE("grammar.acceptTokens");
-    // The closure must run for every stream (even matcher-less ones) to keep
-    // per-stream offset counters in lock-step with stream_groups iteration order.
-    // Empty vector = skip.
     for (auto& stream : stream_groups.allStreams()) {
         std::vector<int32_t> token_ids = extract_tokens(stream);
         if (token_ids.empty()) {
@@ -235,32 +198,6 @@ void NormalOutputDispatcher::invokeBatchAcceptTokens(
             matcher->markFinished();
         }
     }
-}
-
-void NormalOutputDispatcher::batchAcceptGrammarTokens(const StreamGroups&  stream_groups,
-                                                      const torch::Tensor& token_ids_cpu) const {
-    if (!token_ids_cpu.defined()) {
-        return;
-    }
-
-    const size_t   token_stride  = token_ids_cpu.size(1);
-    const int32_t* data          = token_ids_cpu.data_ptr<int32_t>();
-    int            batch_idx_out = 0;
-
-    invokeBatchAcceptTokens(
-        stream_groups,
-        [&](const GenerateStreamPtr& stream) -> std::vector<int32_t> {
-            const int  next_batch_size = stream->nextBatchSize();
-            const bool has_beam_search = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
-            std::vector<int32_t> out;
-            // Beam search + grammar is unsupported → skip via empty vector.
-            if (!has_beam_search) {
-                out.push_back(data[batch_idx_out * token_stride + token_stride - 1]);
-            }
-            batch_idx_out += next_batch_size;
-            return out;
-        },
-        "xgrammar batch_accept");
 }
 
 }  // namespace rtp_llm

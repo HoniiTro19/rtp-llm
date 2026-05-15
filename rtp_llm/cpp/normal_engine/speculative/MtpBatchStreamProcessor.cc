@@ -17,6 +17,52 @@
 
 namespace rtp_llm {
 
+MtpBatchStreamProcessor::MtpBatchStreamProcessor(const ModelConfig&                 model_config,
+                                                 const PDSepConfig&                 pd_sep_config,
+                                                 const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                                                 const CacheConfig&                 cache_config,
+                                                 const SpeculativeExecutionConfig&  sp_config,
+                                                 bool                               warm_up):
+    NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
+    propose_step_(sp_config.gen_num_per_cycle) {
+    if (Py_IsInitialized()) {
+        py::gil_scoped_acquire acquire;
+        try {
+            triton_bitmask_ops_ = py::module_::import("rtp_llm.models_py.triton_kernels.grammar.bitmask_ops");
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_WARNING("MtpBatchStreamProcessor: failed to import bitmask_ops (%s)", e.what());
+        }
+    }
+}
+
+MtpBatchStreamProcessor::~MtpBatchStreamProcessor() {
+    if (!triton_bitmask_ops_) {
+        return;
+    }
+    if (Py_IsInitialized()) {
+        py::gil_scoped_acquire acquire;
+        triton_bitmask_ops_ = py::module_();
+    } else {
+        (void)triton_bitmask_ops_.release();
+    }
+}
+
+bool MtpBatchStreamProcessor::reportGrammarUnavailableIfNeeded(const StreamGroups& stream_groups) const {
+    if (triton_bitmask_ops_) {
+        return false;
+    }
+    if (!Py_IsInitialized()) {
+        return true;
+    }
+    for (auto& stream : stream_groups.allStreams()) {
+        if (stream->hasGrammarMatcher()) {
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION,
+                                "grammar bitmask kernel unavailable: triton import failed");
+        }
+    }
+    return true;
+}
+
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {

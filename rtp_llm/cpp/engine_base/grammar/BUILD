@@ -28,3 +28,23 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "grammar_logits_processor",
+    hdrs = [
+        "GrammarLogitsProcessor.h",
+    ],
+    srcs = [
+        "GrammarLogitsProcessor.cc",
+    ],
+    deps = [
+        ":grammar_cpp_lib",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/models:logits_processor",
+        "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:profiling_scope",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)

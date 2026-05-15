@@ -377,23 +377,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         } else {
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
-            const bool has_grammar = spec_grammar::streamGroupsHaveGrammar(stream_groups);
-            if (has_grammar) {
-                batch_stream_processor_->applyGrammarConstraints(sampler_input, stream_groups);
-            }
             sampler_output = std::move(sampler_->forward(sampler_input));
-            if (has_grammar) {
-                // Advance matcher past the prefill bonus token so the first
-                // decode step's bitmask reflects "state after T0", not START.
-                // Reuses the unified accept driver behind batchAcceptGrammarTokens
-                // — same window-last-token slicing as normal decode (single-token
-                // accept per stream).
-                const torch::Tensor token_ids_cpu =
-                    sampler_output.token_ids.defined() && sampler_output.token_ids.is_cuda()
-                        ? sampler_output.token_ids.cpu()
-                        : sampler_output.token_ids;
-                batch_stream_processor_->outputDispatcher()->batchAcceptGrammarTokens(stream_groups, token_ids_cpu);
-            }
             batch_stream_processor_->updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
         }
     }

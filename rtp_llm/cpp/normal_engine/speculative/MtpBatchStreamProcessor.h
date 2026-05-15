@@ -13,9 +13,8 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up):
-        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-        propose_step_(sp_config.gen_num_per_cycle) {}
+                            bool                               warm_up);
+    ~MtpBatchStreamProcessor() override;
 
     void applySpecGrammarConstraints(SamplerInputs&       inputs,
                                      const StreamGroups&  stream_groups,
@@ -99,6 +98,10 @@ protected:
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
-    int propose_step_;
+    bool reportGrammarUnavailableIfNeeded(const StreamGroups& stream_groups) const;
+
+protected:
+    int         propose_step_;
+    py::module_ triton_bitmask_ops_;
 };
 }  // namespace rtp_llm

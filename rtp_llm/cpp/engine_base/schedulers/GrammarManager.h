@@ -14,12 +14,15 @@
 #include <unordered_set>
 #include <vector>
 
+#include <pybind11/pybind11.h>
 #include <xgrammar/grammar.h>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackendCpp.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+
+namespace py = pybind11;
 
 namespace rtp_llm {
 
@@ -122,6 +125,7 @@ private:
     bool hasBackend() const noexcept { return backend_ != nullptr; }
 
     std::shared_ptr<XGrammarBackendCpp> backend_;
+    py::module_                         triton_bitmask_ops_;
 
     mutable std::mutex      queue_mutex_;
     std::condition_variable worker_cv_;
