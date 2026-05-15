@@ -30,8 +30,8 @@ namespace {
 
 const py::module_& findTritonBitmaskOps(const StreamGroups& stream_groups) {
     for (auto& stream : stream_groups.allStreams()) {
-        if (auto* gp = stream->findGrammarProcessor()) {
-            return gp->tritonBitmaskOps();
+        if (auto* bp = stream->findGrammarProcessor()) {
+            return static_cast<GrammarLogitsProcessor*>(bp)->tritonBitmaskOps();
         }
     }
     static const py::module_ empty;
@@ -698,10 +698,10 @@ void MtpBatchStreamProcessor::batchAcceptSpecGrammarTokens(
         const size_t accept_len = spec_output.accept_len[stream_idx];
         const int*   token_ptr  = spec_output.accept_tokens[stream_idx].data_ptr<int>();
 
-        auto* gp = stream->findGrammarProcessor();
-        if (gp && accept_len > 0) {
+        auto* bp = stream->findGrammarProcessor();
+        if (bp && accept_len > 0) {
             std::vector<int32_t> tokens(token_ptr, token_ptr + accept_len);
-            gp->acceptTokens(tokens);
+            static_cast<GrammarLogitsProcessor*>(bp)->acceptTokens(tokens);
         }
         ++stream_idx;
     }

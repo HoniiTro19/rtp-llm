@@ -6,7 +6,6 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
-#include "rtp_llm/cpp/engine_base/grammar/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -1030,10 +1029,10 @@ GenerateStream::~GenerateStream() {
     stream_magic_ = 0;
 }
 
-GrammarLogitsProcessor* GenerateStream::findGrammarProcessor() const noexcept {
+BaseLogitsProcessor* GenerateStream::findGrammarProcessor() const noexcept {
     for (const auto& p : logits_processor_list_) {
         if (p->grammarMatcher() != nullptr) {
-            return static_cast<GrammarLogitsProcessor*>(p.get());
+            return p.get();
         }
     }
     return nullptr;

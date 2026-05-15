@@ -23,7 +23,6 @@
 namespace rtp_llm {
 
 class RtpGrammarMatcher;
-class GrammarLogitsProcessor;
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 
@@ -451,7 +450,7 @@ public:
         return generator_;
     }
 
-    GrammarLogitsProcessor* findGrammarProcessor() const noexcept;
+    BaseLogitsProcessor* findGrammarProcessor() const noexcept;
     bool                    hasGrammarMatcher() const noexcept;
     void                    clearGrammarMatcher() noexcept;
 
