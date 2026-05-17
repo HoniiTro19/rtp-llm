@@ -458,11 +458,7 @@ class IndexerFP8(PoolBackedModule):
             score_2d = score.view(bsz * q_len, T_max)
             lengths_i32 = compressed_len.view(bsz * q_len)
             out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
-            if (
-                K_eff > 0
-                and K in (512, 1024, 2048)
-                and _persistent_topk_enabled()
-            ):
+            if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
                 rtp_llm_ops.dsv4_persistent_topk(
                     score_2d,
                     lengths_i32,
@@ -482,9 +478,7 @@ class IndexerFP8(PoolBackedModule):
                     )
                     topk_idxs = score_masked.topk(K_eff, dim=-1)[1].to(torch.int32)
                     out_topk_2d[:, :K_eff].copy_(topk_idxs)
-                    k_arange = torch.arange(K, device=out_topk_buffer.device).view(
-                        1, K
-                    )
+                    k_arange = torch.arange(K, device=out_topk_buffer.device).view(1, K)
                     out_topk_2d.masked_fill_(k_arange >= lengths_i32.view(-1, 1), -1)
             return out_topk_buffer
         finally:
@@ -829,29 +823,67 @@ class IndexerFP8(PoolBackedModule):
         if self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
 
+        assert (
+            has_fp8_mqa_logits()
+        ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+        assert self._kv_pool_view.dim() == 3, (
+            "IndexerFP8 expects 3D ``_kv_pool_view`` "
+            "[num_blocks, eb, 132]; got dim="
+            f"{self._kv_pool_view.dim()}"
+        )
+
         self._propagate_pool_to_nested()
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
                 q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
-            with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
-                self.compressor(x, sp, meta=attention_inputs.compressor_meta)
+
+            cp_ctx = getattr(self, "_cp_ctx", None)
+            cp_active = cp_ctx is not None and cp_ctx.cp_size > 1
+            nested_pending = None
+            if cp_active:
+                with record_function_range(
+                    "dsv4.fp8.indexer.prefill.nested_compressor_start"
+                ):
+                    nested_pending = self.compressor.start_prefill(
+                        x, sp, meta=attention_inputs.compressor_meta
+                    )
+            else:
+                with record_function_range(
+                    "dsv4.fp8.indexer.prefill.nested_compressor"
+                ):
+                    self.compressor(x, sp, meta=attention_inputs.compressor_meta)
+
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
                 weights = F.linear(x, self.weights_proj)
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
-            assert self._kv_pool_view.dim() == 3, (
-                "IndexerFP8 expects 3D ``_kv_pool_view`` "
-                "[num_blocks, eb, 132]; got dim="
-                f"{self._kv_pool_view.dim()}"
-            )
-
             if T == 0:
                 # Cold-start prefill before any compressed tokens — no K
                 # to score against; emit empty topk buffer behavior.
+                if nested_pending is not None:
+                    with record_function_range(
+                        "dsv4.fp8.indexer.prefill.nested_compressor_finish"
+                    ):
+                        self.compressor.finish_prefill(nested_pending)
                 return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
+
+            # Phase-3a part 3 fix: when ``_compute_indexer_q`` was given a
+            # flat 2D qr it returns 3D ``[T, H, D]``; ``indexer_q_fp8_quant_fold``
+            # requires 4D ``[B, S, H, D]`` (asserts ``q_bf16.dim() == 4``).
+            # Wrap with a fake B=1 — downstream consumers immediately reshape
+            # to flat ``[M, H, D]`` so the wrap is a free view.
+            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
+            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
+            with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
+                q_fp8, w_fold = indexer_q_fp8_quant_fold(
+                    _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
+                )
+
+            if nested_pending is not None:
+                with record_function_range(
+                    "dsv4.fp8.indexer.prefill.nested_compressor_finish"
+                ):
+                    self.compressor.finish_prefill(nested_pending)
 
             # Vendored CUDA gather: reads paged FP8 K + scale directly
             # via (block_table, cu_kv_seqlens). No host-side slot mapping.
@@ -873,18 +905,6 @@ class IndexerFP8(PoolBackedModule):
                 # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32
                 # contig — view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
                 k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
-
-            # Phase-3a part 3 fix: when ``_compute_indexer_q`` was given a
-            # flat 2D qr it returns 3D ``[T, H, D]``; ``indexer_q_fp8_quant_fold``
-            # requires 4D ``[B, S, H, D]`` (asserts ``q_bf16.dim() == 4``).
-            # Wrap with a fake B=1 — downstream consumers immediately reshape
-            # to flat ``[M, H, D]`` so the wrap is a free view.
-            q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
-            w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
-            with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
-                q_fp8, w_fold = indexer_q_fp8_quant_fold(
-                    _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
-                )
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
