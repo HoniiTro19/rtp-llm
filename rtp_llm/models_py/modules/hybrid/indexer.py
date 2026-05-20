@@ -149,7 +149,6 @@ class Indexer(nn.Module):
                 scale,
                 fallback_proj=self.weights_proj,
             )
-        # Inline fp32 fallback (avoids fp16 linear's inference-tensor bug).
         x_f32 = x.contiguous().float()
         weight = (
             self.weights_proj.weight.float()
@@ -158,6 +157,40 @@ class Indexer(nn.Module):
         )
         weights = (x_f32 @ weight.T).unsqueeze(-1) * q_scale * scale
         return weights
+
+    def _fused_forward_decode(
+        self,
+        q_lora: torch.Tensor,
+        x: torch.Tensor,
+        kv_cache: KVCache,
+        fmha_params: Any,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Fused decode: QK kernel does K(RoPE+Had→bf16) + Q(RoPE+Had+FP8).
+
+        Returns (q_fp8, q_scale).
+        """
+        if q_c_fp8 is not None and q_c_scale is not None:
+            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
+        else:
+            q = self.wq_b(q_lora)
+        q = q.view(-1, self.index_n_heads, self.index_head_dim)
+
+        if x_fp8 is not None and x_scale is not None:
+            k = self.wk(x_fp8, input_scales=x_scale)
+        else:
+            k = self.wk(x)
+        k = self.k_norm(k)
+
+        q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
+            q, k, fmha_params.positions_d
+        )
+        self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
+
+        return q_fp8, q_scale
 
     def _get_q_k_bf16(
         self,

@@ -189,6 +189,8 @@ class MlaAttention(nn.Module):
     ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         q_c = None
+        q_c_fp8 = None
+        q_c_scale = None
         if self.q_lora_rank > 0:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
