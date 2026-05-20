@@ -359,14 +359,6 @@ class GenericMoeDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
-            # Use dual-output (bf16 + fp8): the fp8 stream feeds fused_qkv_a_proj,
-            # but the bf16 normed output MUST replace ``hidden_states`` so that
-            # downstream consumers (Indexer reads hidden_states for its own
-            # weights_proj/wk path) see the normed value, matching baseline
-            # ``hidden_states = self.input_layernorm(hidden_states, residual)``.
-            # Previously this branch passed the un-normed original hidden_states
-            # to self_attn, which made the indexer read a totally wrong feature
-            # vector (~3.98e-1 max_abs vs baseline) and cascaded across layers.
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
@@ -414,7 +406,6 @@ class GenericMoeDecoderLayer(nn.Module):
             )
             hidden_states = self.mlp(hidden_states)
 
-        # 返回 mlp_output 和 residual，让下一层的 input_layernorm 来 fuse 最后的 add
         return DecodeLayerOutput(hidden_states, residual)
 
 
