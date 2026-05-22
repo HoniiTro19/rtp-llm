@@ -602,6 +602,14 @@ class Pipeline(object):
                 mm_inputs=[],
                 generate_config=copy.copy(generate_config),
                 tokenizer=self.tokenizer,
+                # When generate_config.force_batch=True, all sibling streams in this
+                # batch must share a batch_group_id so FIFOScheduler.evaluateWaitingStreams
+                # can lock force_batch_group_id and admit them all into the same
+                # scheduling round. Without it the scheduler skips later siblings
+                # (FIFOScheduler.cc:228-234), splitting them across separate batch_epochs
+                # and defeating both batch-local KV reuse and the "force_batch" guarantee.
+                batch_group_id=base_request_id,
+                batch_group_size=len(prompts),
             )
             inputs.append(gen_input)
 
