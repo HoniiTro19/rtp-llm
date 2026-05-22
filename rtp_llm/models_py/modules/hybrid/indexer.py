@@ -12,12 +12,10 @@ from rtp_llm.utils.model_weight import W
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
-    from rtp_llm.models_py.triton_kernels.common.fused_logits_head_gate import (
-        fused_logits_head_gate,
-    )
+    from rtp_llm.models_py.triton_kernels.common.fused_logits_head_gate import \
+        fused_logits_head_gate
 else:
     fused_logits_head_gate = None  # type: ignore
-
 
 
 class Indexer(nn.Module):
@@ -198,11 +196,21 @@ class Indexer(nn.Module):
         x: torch.Tensor,
         flashmla_params: Any,
         cp_params: Optional[Any],
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        q = self.wq_b(q_lora)
+        if q_c_fp8 is not None and q_c_scale is not None:
+            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
+        else:
+            q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        k = self.wk(x)
+        if x_fp8 is not None and x_scale is not None:
+            k = self.wk(x_fp8, input_scales=x_scale)
+        else:
+            k = self.wk(x)
         k = self.k_norm(k)
 
         if cp_params is not None:
@@ -288,6 +296,10 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         use_fast_path: bool,
         cp_params: Any = None,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
@@ -297,7 +309,16 @@ class Indexer(nn.Module):
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
-        query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params, cp_params)
+        query, key = self._get_q_k_bf16(
+            q_lora,
+            hidden_states,
+            fmha_params,
+            cp_params,
+            x_fp8,
+            x_scale,
+            q_c_fp8,
+            q_c_scale,
+        )
         q_fp8, q_scale = self._quantize_q_k(
             query, key, kv_cache, fmha_params, attention_inputs, cp_params
         )

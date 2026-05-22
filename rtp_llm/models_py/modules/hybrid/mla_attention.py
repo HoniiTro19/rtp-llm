@@ -7,7 +7,8 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
+from rtp_llm.models_py.modules.factory.attention.attn_factory import \
+    MlaImplBase
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
@@ -18,13 +19,11 @@ from rtp_llm.utils.model_weight import W
 # per-token-group fp8 quant launch. ROCm path falls back to the unfused chain.
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
-    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
-        CudaFp8GEMMLinear,
-    )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import \
+        CudaFp8GEMMLinear
     from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
         fused_strided_rmsnorm,
-        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
-    )
+        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output)
 else:
     CudaFp8GEMMLinear = None  # type: ignore
     fused_strided_rmsnorm = None  # type: ignore
@@ -165,6 +164,10 @@ class MlaAttention(nn.Module):
         q_view: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_impl: MlaImplBase,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if self.indexer is None:
             return None
@@ -177,6 +180,10 @@ class MlaAttention(nn.Module):
             fmha_impl.attn_inputs,
             use_fast_path=not fmha_impl.is_sparse(),
             cp_params=fmha_impl.cp_params,
+            x_fp8=x_fp8,
+            x_scale=x_scale,
+            q_c_fp8=q_c_fp8,
+            q_c_scale=q_c_scale,
         )
 
     def forward(
@@ -260,7 +267,13 @@ class MlaAttention(nn.Module):
             compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
         topk_indices = self._run_sparse_indexer(
-            hidden_states, q_c, q_view, kv_cache, fmha_impl
+            hidden_states,
+            q_c,
+            q_view,
+            kv_cache,
+            fmha_impl,
+            x_fp8=x_fp8,
+            x_scale=x_scale,
         )
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
