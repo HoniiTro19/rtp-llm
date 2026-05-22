@@ -19,7 +19,6 @@ else:
     fused_logits_head_gate = None  # type: ignore
 
 
-
 class Indexer(nn.Module):
     """
     Indexer for DeepSeek-V3.2 DSA (DeepSeek Sparse Attention) mechanism.
@@ -149,13 +148,10 @@ class Indexer(nn.Module):
                 scale,
                 fallback_proj=self.weights_proj,
             )
-        x_f32 = x.contiguous().float()
-        weight = (
-            self.weights_proj.weight.float()
-            if self.weights_proj.weight.dtype != torch.float32
-            else self.weights_proj.weight
-        )
-        weights = (x_f32 @ weight.T).unsqueeze(-1) * q_scale * scale
+        x = x.float()
+        weights = self.weights_proj(x)
+        weights = weights.float()
+        weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
 
     def _fused_forward_decode(
@@ -319,11 +315,26 @@ class Indexer(nn.Module):
             and cp_params is None
         ):
             q_fp8, q_scale = self._fused_forward_decode(
-                q_lora, hidden_states, kv_cache, fmha_params,
-                x_fp8, x_scale, q_c_fp8, q_c_scale,
+                q_lora,
+                hidden_states,
+                kv_cache,
+                fmha_params,
+                x_fp8,
+                x_scale,
+                q_c_fp8,
+                q_c_scale,
             )
         else:
-            query, key = self._get_q_k_bf16(q_lora, hidden_states, fmha_params, cp_params, x_fp8, x_scale, q_c_fp8, q_c_scale)
+            query, key = self._get_q_k_bf16(
+                q_lora,
+                hidden_states,
+                fmha_params,
+                cp_params,
+                x_fp8,
+                x_scale,
+                q_c_fp8,
+                q_c_scale,
+            )
             q_fp8, q_scale = self._quantize_q_k(
                 query, key, kv_cache, fmha_params, attention_inputs, cp_params
             )
