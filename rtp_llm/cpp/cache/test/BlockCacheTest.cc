@@ -329,6 +329,29 @@ TEST_F(BlockCacheTest, SelectAndEvictLRUOrder) {
     EXPECT_EQ(cache_->size(), 2);
 }
 
+// Tiered eviction (memory cache export) must never select epoch>0 entries:
+// memory cache has no epoch concept, so exporting batch-local data would leak
+// it into the global memory cache and break batch isolation. epoch>0 entries
+// are reclaimed only via BlockCache::pop's Phase 1 (local free, no export).
+TEST_F(BlockCacheTest, SelectAndEvictSkipsBatchLocalEntries) {
+    CacheItem global1     = {101, 0, 1, false, /*epoch=*/0};
+    CacheItem batch_local = {102, 0, 2, false, /*epoch=*/42};
+    CacheItem global2     = {103, 0, 3, false, /*epoch=*/0};
+    cache_->put(global1);
+    cache_->put(batch_local);
+    cache_->put(global2);
+
+    auto result = cache_->selectAndEvict(/*min_blocks=*/3);
+    // Only the two epoch=0 entries are eligible for tiered eviction.
+    EXPECT_EQ(result.evicted_keys.size(), 2u);
+    std::set<CacheKeyType> evicted(result.evicted_keys.begin(), result.evicted_keys.end());
+    EXPECT_TRUE(evicted.count(101));
+    EXPECT_TRUE(evicted.count(103));
+    EXPECT_EQ(evicted.count(102), 0u);  // batch-local entry preserved
+    // batch-local entry stays in cache for Phase-1 pop to reclaim locally.
+    EXPECT_EQ(cache_->size(), 1u);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

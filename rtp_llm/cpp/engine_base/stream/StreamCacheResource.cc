@@ -755,6 +755,16 @@ void StreamCacheResource::insertIntoCache() {
     auto       insert_resource = batch_kv_cache_resource_->copy();
     InsertInfo insert_info{insert_resource, stream_->completeTokenIdsPtr(), false};
     insert_info.epoch = batch_epoch;
+    // Lifecycle note: prefix-length batch-local entries inserted here are NOT
+    // explicitly promoted to epoch=0 when the stream finishes. tryReleaseKVBlock
+    // re-inserts a full-length entry with epoch=0 (different cache_key, so it
+    // does not replace this one), and the leftover epoch>0 entry is reclaimed
+    // lazily by BlockCache::pop's Phase-1 path (which preferentially evicts
+    // non-resident epoch>0 entries under memory pressure). This is an
+    // intentional trade-off — eager remove+re-insert would add a write per
+    // stream-finish for marginal benefit, since the stale entry is invisible
+    // to other batches anyway (different epoch) and reclaimed before any
+    // global entries are evicted.
     resource_context_.cache_manager->insertIntoCache(insert_info);
 }
 

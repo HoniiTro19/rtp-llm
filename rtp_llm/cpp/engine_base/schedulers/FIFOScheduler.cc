@@ -175,7 +175,7 @@ void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
     }
 }
 
-void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
+void FIFOScheduler::evaluateWaitingStreams() {
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr> new_streams;
     int64_t                 batch_epoch          = ++schedule_round_;
@@ -189,7 +189,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
     std::unordered_map<int64_t, GroupInfo> request_group_info;
 
     // Build group info statistics for force_batch streams
-    for (const auto& stream : waiting_streams) {
+    for (const auto& stream : waiting_streams_) {
         if (stream->forceBatch() && stream->batchGroupId() != -1) {
             auto& info = request_group_info[stream->batchGroupId()];
             if (info.count == 0) {
@@ -234,14 +234,16 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             }
         }
 
-        (*it)->setBatchEpoch(batch_epoch);
-        // Check for errors and memory constraints.
+        // Check for errors and memory constraints. Only assign batch_epoch to streams
+        // that actually clear the memory check, so streams left in waiting_streams_
+        // across rounds do not carry stale epoch values.
         // NOTE: batch-level insertIntoCache happens later in GenerateStateMachine,
         // right before transitioning to RUNNING — that point is reached only after
         // the async LOADING_CACHE state completes, so connector-loaded prefix data
         // is already present in the blocks we expose for sibling reuse.
         if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
             && evaluateRunningMemory(new_streams, stream)) {
+            stream->setBatchEpoch(batch_epoch);
             stream->reportEvent(StreamEvents::CanRun);
             new_streams.push_back(stream);
 
@@ -300,7 +302,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     //       their new state (RUNNING or LOADING_CACHE) based on the events set in Phase 1.
     // This separation ensures safe iteration while deferring structural modifications.
     size_t prev_waiting_size = waiting_streams_.size();
-    evaluateWaitingStreams(waiting_streams_);
+    evaluateWaitingStreams();
     evaluateAndUpdateStreams(waiting_streams_);
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();

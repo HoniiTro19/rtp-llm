@@ -4,12 +4,6 @@ import sys
 import time
 import traceback
 
-# Frontend processes don't need CUDA; hide GPUs before any torch/CUDA library
-# loads (rtp_llm.ops below pulls in libth_transformer + libcaffe2_nvrtc which
-# touch the CUDA driver and can SIGSEGV in the spawned child when the parent
-# has already initialized CUDA state).
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
 from setproctitle import setproctitle
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs

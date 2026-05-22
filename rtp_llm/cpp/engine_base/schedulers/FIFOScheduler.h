@@ -21,8 +21,8 @@ public:
                            const ParallelismConfig&               parallelism_config,
                            const ModelSpecificConfig&             model_specific_config,
                            const std::shared_ptr<KVCacheManager>& cache_manager,
-                           const kmonitor::MetricsReporterPtr     metrics_reporter          = nullptr,
-                           const int                              max_score_len             = 1);
+                           const kmonitor::MetricsReporterPtr     metrics_reporter = nullptr,
+                           const int                              max_score_len    = 1);
 
     ~FIFOScheduler() override;
 
@@ -56,7 +56,7 @@ private:
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
+    void evaluateWaitingStreams();
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool checkInputLength(const GenerateStreamPtr& stream);
 

@@ -127,12 +127,20 @@ BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
         }
     }
 
-    // Second pass: group non-resident items by cache_key in LRU order (back = least-recently-used)
+    // Second pass: group non-resident items by cache_key in LRU order (back = least-recently-used).
+    // Tiered eviction promotes selected entries to memory/remote cache via
+    // storeCacheAsync, where there is no epoch concept — exposing a batch-local
+    // (epoch>0) entry to that path would leak it into the global memory cache and
+    // break batch isolation. Skip epoch>0 entries here; they are only reclaimed
+    // through BlockCache::pop (Phase 1) which frees blocks locally without export.
     std::unordered_map<CacheKeyType, std::vector<CacheItem>> grouped_items;
     std::vector<CacheKeyType>                                lru_keys;
     for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
         const auto& item = it->second;
         if (item.is_resident) {
+            continue;
+        }
+        if (item.epoch != GLOBAL_EPOCH) {
             continue;
         }
         auto [iter, inserted] = grouped_items.try_emplace(item.cache_key);
