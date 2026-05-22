@@ -265,24 +265,13 @@ def fused_logits_head_gate(
     w_is_transposed = weight.stride(0) < weight.stride(1)
 
     if T <= 32:
-        # small-T kernel: grid (T, N), one program per (t, n) pair.
-        BLOCK_K = triton.next_power_of_2(K)
-        num_warps = 4 if K >= 4096 else 2
-        _fused_logits_head_gate_small_t_kernel[(T, N)](
-            x,
-            weight,
-            qs_2d,
-            out_2d,
-            float(scale_const),
-            K,
-            x.stride(0),
-            weight.stride(0),
-            weight.stride(1),
-            qs_2d.stride(0),
-            out_2d.stride(0),
-            BLOCK_K=BLOCK_K,
-            num_warps=num_warps,
-        )
+        # Decode path: use cuBLAS GEMV for bit-exact match with the unfused
+        # ``x.float() @ weight.float().T`` baseline. The Triton tree-reduce
+        # has ~1e-10 fp32 accumulation diff that flips sparse top-k selection.
+        x_fp32 = x.float()
+        w_fp32 = weight.float() if weight.dtype != torch.float32 else weight
+        gemv = x_fp32 @ w_fp32.T
+        out_2d = gemv * qs_2d * float(scale_const)
     else:
         BLOCK_M = 16
         BLOCK_K = 128
