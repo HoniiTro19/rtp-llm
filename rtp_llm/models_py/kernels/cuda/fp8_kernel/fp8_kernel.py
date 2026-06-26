@@ -2,7 +2,10 @@ import functools
 import json
 import logging
 import os
+import time
+from contextlib import contextmanager
 from functools import lru_cache
+from itertools import count
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -32,6 +35,80 @@ fp8_dtype = torch.float8_e4m3fn
 finfo = torch.finfo(fp8_dtype)
 fp8_max = finfo.max
 fp8_min = -fp8_max
+_timestep_call_counter = count(1)
+
+
+@functools.cache
+def _timestep_enabled() -> bool:
+    return os.environ.get("RTP_LLM_DEEPGEMM_TIMESTEP", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+@functools.cache
+def _timestep_sync_enabled() -> bool:
+    return os.environ.get("RTP_LLM_DEEPGEMM_TIMESTEP_SYNC", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _maybe_sync_for_timestep() -> None:
+    if _timestep_sync_enabled() and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _tensor_desc(tensor: Optional[torch.Tensor]) -> str:
+    if tensor is None:
+        return "None"
+    return (
+        f"shape={tuple(tensor.shape)},dtype={tensor.dtype},"
+        f"device={tensor.device},contiguous={tensor.is_contiguous()}"
+    )
+
+
+def _log_timestep(
+    op: str,
+    call_id: int,
+    phase: str,
+    start_ns: Optional[int] = None,
+    **fields: Any,
+) -> int:
+    if not _timestep_enabled():
+        return time.perf_counter_ns()
+
+    _maybe_sync_for_timestep()
+    now_ns = time.perf_counter_ns()
+    wall_us = time.time_ns() // 1000
+    elapsed = ""
+    if start_ns is not None:
+        elapsed = f" elapsed_ms={(now_ns - start_ns) / 1_000_000:.3f}"
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    logger.info(
+        "[FP8_QUANT_TIMESTEP] wall_us=%d mono_ns=%d op=%s call=%d phase=%s%s %s",
+        wall_us,
+        now_ns,
+        op,
+        call_id,
+        phase,
+        elapsed,
+        details,
+    )
+    return now_ns
+
+@contextmanager
+def _record_timestep_scope(name: str):
+    if _timestep_enabled():
+        with torch.profiler.record_function(name):
+            yield
+    else:
+        yield
+
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -122,8 +199,66 @@ def sgl_per_token_group_quant_fp8(
     ), "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
 
+    if not _timestep_enabled():
+        out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
+        x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
+        x_s = create_per_token_group_quant_fp8_output_scale(
+            x_shape=out_shape,
+            device=x.device,
+            group_size=group_size,
+            column_major_scales=column_major_scales,
+            scale_tma_aligned=scale_tma_aligned,
+            scale_ue8m0=scale_ue8m0,
+        )
+        if x.shape[0] > 0:
+            if masked_m is not None:
+                per_token_group_quant_fp8_v2(
+                    x,
+                    x_q,
+                    x_s,
+                    group_size,
+                    eps,
+                    fp8_min,
+                    fp8_max,
+                    scale_ue8m0,
+                    fuse_silu_and_mul,
+                    masked_m,
+                )
+            else:
+                per_token_group_quant_fp8(
+                    x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
+                )
+        return x_q, x_s
+
+    call_id = next(_timestep_call_counter)
+    start_ns = _log_timestep(
+        "sgl_per_token_group_quant_fp8",
+        call_id,
+        "begin",
+        x=_tensor_desc(x),
+        group_size=group_size,
+        column_major_scales=column_major_scales,
+        scale_tma_aligned=scale_tma_aligned,
+        scale_ue8m0=scale_ue8m0,
+        fuse_silu_and_mul=fuse_silu_and_mul,
+        masked_m=_tensor_desc(masked_m),
+    )
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
+    _log_timestep(
+        "sgl_per_token_group_quant_fp8",
+        call_id,
+        "before_alloc_q",
+        start_ns,
+        out_shape=out_shape,
+    )
     x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
+    _log_timestep(
+        "sgl_per_token_group_quant_fp8",
+        call_id,
+        "after_alloc_q",
+        start_ns,
+        x_q=_tensor_desc(x_q),
+    )
     x_s = create_per_token_group_quant_fp8_output_scale(
         x_shape=out_shape,
         device=x.device,
@@ -132,25 +267,48 @@ def sgl_per_token_group_quant_fp8(
         scale_tma_aligned=scale_tma_aligned,
         scale_ue8m0=scale_ue8m0,
     )
+    _log_timestep(
+        "sgl_per_token_group_quant_fp8",
+        call_id,
+        "after_alloc_scale",
+        start_ns,
+        x_s=_tensor_desc(x_s),
+    )
     if x.shape[0] > 0:
         if masked_m is not None:
-            per_token_group_quant_fp8_v2(
-                x,
-                x_q,
-                x_s,
-                group_size,
-                eps,
-                fp8_min,
-                fp8_max,
-                scale_ue8m0,
-                fuse_silu_and_mul,
-                masked_m,
-            )
+            _log_timestep("sgl_per_token_group_quant_fp8", call_id, "before_quant_v2", start_ns)
+            with _record_timestep_scope(f"rtp.fp8_quant.per_token_group_quant_v2.call_{call_id}"):
+                per_token_group_quant_fp8_v2(
+                    x,
+                    x_q,
+                    x_s,
+                    group_size,
+                    eps,
+                    fp8_min,
+                    fp8_max,
+                    scale_ue8m0,
+                    fuse_silu_and_mul,
+                    masked_m,
+                )
+            _log_timestep("sgl_per_token_group_quant_fp8", call_id, "after_quant_v2", start_ns)
         else:
-            per_token_group_quant_fp8(
-                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
-            )
+            _log_timestep("sgl_per_token_group_quant_fp8", call_id, "before_quant", start_ns)
+            with _record_timestep_scope(f"rtp.fp8_quant.per_token_group_quant.call_{call_id}"):
+                per_token_group_quant_fp8(
+                    x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
+                )
+            _log_timestep("sgl_per_token_group_quant_fp8", call_id, "after_quant", start_ns)
+    else:
+        _log_timestep("sgl_per_token_group_quant_fp8", call_id, "skip_empty", start_ns)
 
+    _log_timestep(
+        "sgl_per_token_group_quant_fp8",
+        call_id,
+        "return",
+        start_ns,
+        x_q=_tensor_desc(x_q),
+        x_s=_tensor_desc(x_s),
+    )
     return x_q, x_s
 
 

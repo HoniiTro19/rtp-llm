@@ -1,5 +1,9 @@
 import functools
+import logging
+import os
+import time
 from contextlib import contextmanager
+from itertools import count
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
 import torch
@@ -7,6 +11,8 @@ import triton
 import triton.language as tl
 
 from rtp_llm.utils.module_util import has_module, resolve_symbol
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "fp8_gemm_nt",
@@ -46,6 +52,84 @@ _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
+_timestep_call_counter = count(1)
+
+
+@functools.cache
+def _timestep_enabled() -> bool:
+    return os.environ.get("RTP_LLM_DEEPGEMM_TIMESTEP", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+@functools.cache
+def _timestep_sync_enabled() -> bool:
+    return os.environ.get("RTP_LLM_DEEPGEMM_TIMESTEP_SYNC", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _maybe_sync_for_timestep() -> None:
+    if _timestep_sync_enabled() and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _tensor_desc(tensor: Optional[torch.Tensor]) -> str:
+    if tensor is None:
+        return "None"
+    return (
+        f"shape={tuple(tensor.shape)},dtype={tensor.dtype},"
+        f"device={tensor.device},contiguous={tensor.is_contiguous()}"
+    )
+
+
+def _pair_desc(pair: Tuple[torch.Tensor, torch.Tensor]) -> str:
+    return f"data({_tensor_desc(pair[0])}),scale({_tensor_desc(pair[1])})"
+
+
+def _log_timestep(
+    op: str,
+    call_id: int,
+    phase: str,
+    start_ns: Optional[int] = None,
+    **fields: Any,
+) -> int:
+    if not _timestep_enabled():
+        return time.perf_counter_ns()
+
+    _maybe_sync_for_timestep()
+    now_ns = time.perf_counter_ns()
+    wall_us = time.time_ns() // 1000
+    elapsed = ""
+    if start_ns is not None:
+        elapsed = f" elapsed_ms={(now_ns - start_ns) / 1_000_000:.3f}"
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    logger.info(
+        "[DEEPGEMM_TIMESTEP] wall_us=%d mono_ns=%d op=%s call=%d phase=%s%s %s",
+        wall_us,
+        now_ns,
+        op,
+        call_id,
+        phase,
+        elapsed,
+        details,
+    )
+    return now_ns
+
+@contextmanager
+def _record_timestep_scope(name: str) -> Generator[None, None, None]:
+    if _timestep_enabled():
+        with torch.profiler.record_function(name):
+            yield
+    else:
+        yield
+
 
 
 @functools.cache
@@ -389,17 +473,53 @@ def fp8_gemm_nt(
     global _fp8_gemm_nt_impl
     if _fp8_gemm_nt_impl is None:
         return _missing_deep_gemm()
-    _fp8_gemm_nt_impl(
-        a,
-        b,
-        output,
-        c,
+    if not _timestep_enabled():
+        _fp8_gemm_nt_impl(
+            a,
+            b,
+            output,
+            c,
+            compiled_dims=compiled_dims,
+            # normal gemm tmp not use ue8m0 cast default
+            disable_ue8m0_cast=(
+                disable_ue8m0_cast if disable_ue8m0_cast is not None else True
+            ),
+        )
+        return
+
+    call_id = next(_timestep_call_counter)
+    start_ns = _log_timestep(
+        "fp8_gemm_nt",
+        call_id,
+        "begin",
+        a=_pair_desc(a),
+        b=_pair_desc(b),
+        output=_tensor_desc(output),
+        c=_tensor_desc(c),
         compiled_dims=compiled_dims,
-        # normal gemm tmp not use ue8m0 cast default
-        disable_ue8m0_cast=(
-            disable_ue8m0_cast if disable_ue8m0_cast is not None else True
-        ),
+        disable_ue8m0_cast=disable_ue8m0_cast,
     )
+    resolved_disable_ue8m0_cast = (
+        disable_ue8m0_cast if disable_ue8m0_cast is not None else True
+    )
+    _log_timestep(
+        "fp8_gemm_nt",
+        call_id,
+        "before_impl",
+        start_ns,
+        resolved_disable_ue8m0_cast=resolved_disable_ue8m0_cast,
+    )
+    with _record_timestep_scope(f"rtp.deepgemm.fp8_gemm_nt.impl.call_{call_id}"):
+        _fp8_gemm_nt_impl(
+            a,
+            b,
+            output,
+            c,
+            compiled_dims=compiled_dims,
+            # normal gemm tmp not use ue8m0 cast default
+            disable_ue8m0_cast=resolved_disable_ue8m0_cast,
+        )
+    _log_timestep("fp8_gemm_nt", call_id, "after_impl", start_ns)
 
 
 def m_grouped_fp8_gemm_nt_contiguous(
@@ -426,18 +546,57 @@ def m_grouped_fp8_gemm_nt_contiguous(
     global _m_grouped_fp8_gemm_nt_contiguous_impl
     if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
-    _m_grouped_fp8_gemm_nt_contiguous_impl(
-        a,
-        b,
-        output,
-        m_indices,
+    if not _timestep_enabled():
+        _m_grouped_fp8_gemm_nt_contiguous_impl(
+            a,
+            b,
+            output,
+            m_indices,
+            compiled_dims=compiled_dims,
+            disable_ue8m0_cast=(
+                disable_ue8m0_cast
+                if disable_ue8m0_cast is not None
+                else not is_deep_gemm_e8m0_used()
+            ),
+        )
+        return
+
+    call_id = next(_timestep_call_counter)
+    start_ns = _log_timestep(
+        "m_grouped_fp8_gemm_nt_contiguous",
+        call_id,
+        "begin",
+        a=_pair_desc(a),
+        b=_pair_desc(b),
+        output=_tensor_desc(output),
+        m_indices=_tensor_desc(m_indices),
         compiled_dims=compiled_dims,
-        disable_ue8m0_cast=(
-            disable_ue8m0_cast
-            if disable_ue8m0_cast is not None
-            else not is_deep_gemm_e8m0_used()
-        ),
+        disable_ue8m0_cast=disable_ue8m0_cast,
     )
+    resolved_disable_ue8m0_cast = (
+        disable_ue8m0_cast
+        if disable_ue8m0_cast is not None
+        else not is_deep_gemm_e8m0_used()
+    )
+    _log_timestep(
+        "m_grouped_fp8_gemm_nt_contiguous",
+        call_id,
+        "before_impl",
+        start_ns,
+        resolved_disable_ue8m0_cast=resolved_disable_ue8m0_cast,
+    )
+    with _record_timestep_scope(
+        f"rtp.deepgemm.m_grouped_fp8_gemm_nt_contiguous.impl.call_{call_id}"
+    ):
+        _m_grouped_fp8_gemm_nt_contiguous_impl(
+            a,
+            b,
+            output,
+            m_indices,
+            compiled_dims=compiled_dims,
+            disable_ue8m0_cast=resolved_disable_ue8m0_cast,
+        )
+    _log_timestep("m_grouped_fp8_gemm_nt_contiguous", call_id, "after_impl", start_ns)
 
 
 def maybe_pack_ue8m0_scale(
@@ -448,21 +607,63 @@ def maybe_pack_ue8m0_scale(
     # 2. sf.scalar_type() == torch::kFloat
     # 3. not disable_ue8m0_cast
     # 4. num_groups > 1
+    if not _timestep_enabled():
+        arch_major, _ = torch.cuda.get_device_capability()
+        if arch_major != 10:
+            return scale
+        if scale.dtype != torch.float32:
+            return scale
+        if disable_ue8m0_cast:
+            return scale
+        if scale.dim() != 3 or scale.shape[0] < 2:
+            return scale
+
+        gran_mn = x.shape[-2] // scale.shape[-2]
+        if gran_mn != 1 and gran_mn != 128:
+            return scale
+
+        return pack_ue8m0_kernel_launcher(scale, gran_mn)
+
+    call_id = next(_timestep_call_counter)
+    start_ns = _log_timestep(
+        "maybe_pack_ue8m0_scale",
+        call_id,
+        "begin",
+        x=_tensor_desc(x),
+        scale=_tensor_desc(scale),
+        disable_ue8m0_cast=disable_ue8m0_cast,
+    )
     arch_major, _ = torch.cuda.get_device_capability()
     if arch_major != 10:
+        _log_timestep("maybe_pack_ue8m0_scale", call_id, "skip_arch", start_ns, arch_major=arch_major)
         return scale
     if scale.dtype != torch.float32:
+        _log_timestep("maybe_pack_ue8m0_scale", call_id, "skip_dtype", start_ns, dtype=scale.dtype)
         return scale
     if disable_ue8m0_cast:
+        _log_timestep("maybe_pack_ue8m0_scale", call_id, "skip_disabled", start_ns)
         return scale
     if scale.dim() != 3 or scale.shape[0] < 2:
+        _log_timestep(
+            "maybe_pack_ue8m0_scale",
+            call_id,
+            "skip_shape",
+            start_ns,
+            dim=scale.dim(),
+            shape=tuple(scale.shape),
+        )
         return scale
 
     gran_mn = x.shape[-2] // scale.shape[-2]
     if gran_mn != 1 and gran_mn != 128:
+        _log_timestep("maybe_pack_ue8m0_scale", call_id, "skip_gran_mn", start_ns, gran_mn=gran_mn)
         return scale
 
-    return pack_ue8m0_kernel_launcher(scale, gran_mn)
+    _log_timestep("maybe_pack_ue8m0_scale", call_id, "before_pack", start_ns, gran_mn=gran_mn)
+    with _record_timestep_scope(f"rtp.deepgemm.pack_ue8m0.call_{call_id}"):
+        packed = pack_ue8m0_kernel_launcher(scale, gran_mn)
+    _log_timestep("maybe_pack_ue8m0_scale", call_id, "after_pack", start_ns, packed=_tensor_desc(packed))
+    return packed
 
 
 def m_grouped_fp8_gemm_nt_masked(
@@ -496,18 +697,53 @@ def m_grouped_fp8_gemm_nt_masked(
         else not is_deep_gemm_e8m0_used()
     )
 
-    a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
-    b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
+    if not _timestep_enabled():
+        a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
+        b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
+        _m_grouped_fp8_gemm_nt_masked_impl(
+            a,
+            b,
+            output,
+            masked_m,
+            expected_m,
+            compiled_dims=compiled_dims,
+            disable_ue8m0_cast=disable_ue8m0_cast,
+        )
+        return
 
-    _m_grouped_fp8_gemm_nt_masked_impl(
-        a,
-        b,
-        output,
-        masked_m,
-        expected_m,
+    call_id = next(_timestep_call_counter)
+    start_ns = _log_timestep(
+        "m_grouped_fp8_gemm_nt_masked",
+        call_id,
+        "begin",
+        a=_pair_desc(a),
+        b=_pair_desc(b),
+        output=_tensor_desc(output),
+        masked_m=_tensor_desc(masked_m),
+        expected_m=expected_m,
         compiled_dims=compiled_dims,
         disable_ue8m0_cast=disable_ue8m0_cast,
     )
+    _log_timestep("m_grouped_fp8_gemm_nt_masked", call_id, "before_pack_a", start_ns)
+    a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
+    _log_timestep("m_grouped_fp8_gemm_nt_masked", call_id, "after_pack_a", start_ns, a=_pair_desc(a))
+    b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
+    _log_timestep("m_grouped_fp8_gemm_nt_masked", call_id, "after_pack_b", start_ns, b=_pair_desc(b))
+
+    _log_timestep("m_grouped_fp8_gemm_nt_masked", call_id, "before_impl", start_ns)
+    with _record_timestep_scope(
+        f"rtp.deepgemm.m_grouped_fp8_gemm_nt_masked.impl.call_{call_id}"
+    ):
+        _m_grouped_fp8_gemm_nt_masked_impl(
+            a,
+            b,
+            output,
+            masked_m,
+            expected_m,
+            compiled_dims=compiled_dims,
+            disable_ue8m0_cast=disable_ue8m0_cast,
+        )
+    _log_timestep("m_grouped_fp8_gemm_nt_masked", call_id, "after_impl", start_ns)
 
 
 def bf16_gemm_nt(
